@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+
+# Test artifacts
+.test_tmp/
+.pytest_tmp/
+.pytest_cache/
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+
+# lil_word work directories
+.lil_word/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+admin/
+archive/
