@@ -93,7 +93,11 @@ def _run(
                 while proc.poll() is None:
                     if cancel_check():
                         proc.terminate()
-                        proc.wait(timeout=5)
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait()
                         raise CancelledError("Operation cancelled by user.")
                     if timeout and (time.time() - start_time) > timeout:
                         proc.kill()

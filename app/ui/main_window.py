@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import sys
-import time
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -20,17 +19,22 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from app.models.caption import Caption, TranscriptWord
 from app.models.project import Project
 from app.services import media_service
-from app.services.transcription_service import transcribe
-from app.services.caption_engine import generate_captions, normalize_captions
+from app.services.caption_engine import normalize_captions
+from app.services.caption_job import (
+    export_burned_caption_video,
+    generate_caption_blocks,
+    prepare_caption_media,
+    transcribe_and_generate_captions,
+)
 from app.ui.caption_rules_dialog import CaptionRulesDialog
 from app.ui.export_settings_dialog import ExportSettingsDialog
 from app.services.alignment_service import refine_timing
-from app.services.export_service import export_srt, export_ass, export_burned_video
+from app.services.export_service import export_srt, export_ass
 from app.services.project_service import ProjectService
 from app.ui.video_panel import VideoPanel
 from app.ui.caption_panel import CaptionPanel
 from app.utils.settings import Settings
-from app.utils.export_helpers import build_export_name, build_audio_output_path, build_proxy_output_path
+from app.utils.export_helpers import build_export_name, build_audio_output_path
 from app.utils.import_session import ImportSessionGuard
 from app.utils.errors import CancelledError, ModelDownloadError
 
@@ -69,57 +73,21 @@ class _ImportWorker(QObject):
         try:
             log.info("[import] worker started  media=%s  audio_out=%s",
                      self._media_path, self._audio_out_path)
-            log.info("[import] python executable: %s", sys.executable)
-
-            # ── Probe ────────────────────────────────────────────────
-            t0 = time.monotonic()
-            if self._is_cancelled:
-                raise CancelledError("Import cancelled.")
-                
-            self.progress.emit("Probing media…")
-            log.info("[import] probe start")
-            duration_ms = media_service.get_duration_ms(self._media_path, cancel_check=lambda: self._is_cancelled)
-            log.info("[import] probe done  duration_ms=%d  elapsed=%.2fs",
-                     duration_ms, time.monotonic() - t0)
-
-            if self._is_cancelled:
-                raise CancelledError("Import cancelled.")
-
-            t1 = time.monotonic()
-            log.info("[import] has_video_stream start")
-            has_video = media_service.has_video_stream(self._media_path, cancel_check=lambda: self._is_cancelled)
-            log.info("[import] has_video_stream=%s  elapsed=%.2fs",
-                     has_video, time.monotonic() - t1)
-
-            if self._is_cancelled:
-                raise CancelledError("Import cancelled.")
-
-            # ── Check Proxy ──────────────────────────────────────────
-            proxy_out_path = ""
-            if has_video:
-                self.progress.emit("Checking video compatibility…")
-                if media_service.needs_proxy(self._media_path, cancel_check=lambda: self._is_cancelled):
-                    t_proxy = time.monotonic()
-                    self.progress.emit("Generating proxy video…")
-                    proxy_out_path = build_proxy_output_path(Path(self._media_path).stem, str(Path(self._audio_out_path).parent))
-                    log.info("[import] generate_proxy start out=%s", proxy_out_path)
-                    media_service.generate_proxy(self._media_path, proxy_out_path, cancel_check=lambda: self._is_cancelled)
-                    log.info("[import] generate_proxy done elapsed=%.2fs", time.monotonic() - t_proxy)
-
-            if self._is_cancelled:
-                raise CancelledError("Import cancelled.")
-
-            # ── Extract audio ────────────────────────────────────────
-            t2 = time.monotonic()
-            self.progress.emit("Extracting audio…")
-            log.info("[import] extract_audio_wav start  out=%s", self._audio_out_path)
-            media_service.extract_audio_wav(self._media_path, self._audio_out_path, cancel_check=lambda: self._is_cancelled)
-            log.info("[import] extract_audio_wav done  elapsed=%.2fs",
-                     time.monotonic() - t2)
-
-            log.info("[import] worker finished successfully  total=%.2fs",
-                     time.monotonic() - t0)
-            self.finished.emit(self._audio_out_path, duration_ms, has_video, proxy_out_path, self._token)
+            info = prepare_caption_media(
+                self._media_path,
+                audio_path=self._audio_out_path,
+                work_dir=str(Path(self._audio_out_path).parent),
+                progress_callback=lambda progress: self.progress.emit(progress.message),
+                cancel_check=lambda: self._is_cancelled,
+            )
+            log.info("[import] worker finished successfully")
+            self.finished.emit(
+                info.audio_path,
+                info.media_duration_ms,
+                info.has_video,
+                info.proxy_path,
+                self._token,
+            )
         except CancelledError:
             log.info("[import] worker cancelled")
             self.cancelled.emit(self._token)
@@ -153,32 +121,12 @@ class _TranscribeWorker(QObject):
     @Slot()
     def run(self):
         try:
-            self.progress.emit("Loading whisper model…")
-            segments, words = transcribe(
+            segments, words, captions = transcribe_and_generate_captions(
                 self._audio_path,
-                model_size=self._settings.get("whisper_model", "base"),
-                device=self._settings.get("whisper_device", "auto"),
-                compute_type=self._settings.get("whisper_compute_type", "int8"),
+                self._settings,
+                media_duration_ms=self._media_duration_ms,
+                progress_callback=lambda progress: self.progress.emit(progress.message),
                 cancel_check=lambda: self._is_cancelled,
-            )
-            self.progress.emit("Generating caption blocks…")
-            captions = generate_captions(
-                segments, words,
-                lead_in=self._settings.get("lead_in_ms", 150),
-                lead_out=self._settings.get("lead_out_ms", 250),
-                min_dur=self._settings.get("min_caption_ms", 700),
-                max_dur=self._settings.get("max_caption_ms", 3500),
-                min_gap=self._settings.get("min_gap_ms", 100),
-                max_lines=self._settings.get("max_lines", 2),
-                max_cpl=self._settings.get("max_chars_per_line", 42),
-                target_cps_min=self._settings.get("target_cps_min", 12),
-                target_cps_max=self._settings.get("target_cps_max", 20),
-                media_duration_ms=self._media_duration_ms,
-            )
-            self.progress.emit("Refining timing with silence detection…")
-            captions = refine_timing(
-                captions, self._audio_path,
-                media_duration_ms=self._media_duration_ms,
             )
             self.finished.emit(segments, words, captions)
         except CancelledError:
@@ -213,7 +161,12 @@ class _ExportWorker(QObject):
     @Slot()
     def run(self):
         try:
-            export_burned_video(self._media_path, self._captions, self._out_path, cancel_check=lambda: self._is_cancelled)
+            export_burned_caption_video(
+                self._media_path,
+                self._captions,
+                self._out_path,
+                cancel_check=lambda: self._is_cancelled,
+            )
             self.finished.emit(self._out_path)
         except CancelledError:
             self.cancelled.emit()
@@ -676,6 +629,10 @@ class MainWindow(QMainWindow):
         log.error("[import] WATCHDOG fired after %ds – treating import as failed",
                   _IMPORT_WATCHDOG_SECS)
 
+        worker = getattr(self, "_import_worker_ref", None)
+        if worker is not None and not getattr(worker, "_is_cancelled", False):
+            worker.cancel()
+
         # Force-clear the guard so a new import can start
         current_token = self._import_guard.token
         if current_token:
@@ -890,17 +847,10 @@ class MainWindow(QMainWindow):
         """
         if segments is None:
             segments = self._segments
-        captions = generate_captions(
-            segments, words,
-            lead_in=self._settings.get("lead_in_ms", 150),
-            lead_out=self._settings.get("lead_out_ms", 250),
-            min_dur=self._settings.get("min_caption_ms", 700),
-            max_dur=self._settings.get("max_caption_ms", 3500),
-            min_gap=self._settings.get("min_gap_ms", 100),
-            max_lines=self._settings.get("max_lines", 2),
-            max_cpl=self._settings.get("max_chars_per_line", 42),
-            target_cps_min=self._settings.get("target_cps_min", 12),
-            target_cps_max=self._settings.get("target_cps_max", 20),
+        captions = generate_caption_blocks(
+            segments,
+            words,
+            self._settings,
             media_duration_ms=self._media_duration_ms,
         )
         if self._project and self._project.audio_path:

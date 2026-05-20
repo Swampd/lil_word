@@ -291,7 +291,7 @@ def test_segment_slow_capping():
     assert dur == 950
 
 
-@patch("app.ui.main_window.generate_captions")
+@patch("app.services.caption_job.caption_engine.generate_captions")
 @patch("app.ui.main_window.QMessageBox.warning")
 def test_mainwindow_passes_caption_rules(mock_warning, mock_generate):
     """Verify MainWindow uses settings values during _reflow_captions."""

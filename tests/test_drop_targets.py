@@ -96,6 +96,42 @@ def test_watchdog_clears_guard_and_restores_ui(mock_msgbox):
 
 
 @patch("app.ui.main_window.QMessageBox")
+def test_watchdog_cancels_worker_before_clearing_ui_state(mock_msgbox):
+    """Watchdog cancellation must reach the active worker before UI state is reset."""
+    window = _make_window()
+
+    token = window._import_guard.start_import("/fake/media.mp3")
+    assert token is not None
+    window._progress.setVisible(True)
+    window._btn_import.setEnabled(False)
+    window._project = Mock()
+    window._captions = [Mock()]
+    window._words = [Mock()]
+    window._segments = [{"start": 0, "end": 1, "text": "before reset"}]
+    window._media_duration_ms = 5000
+
+    worker = Mock()
+    worker._is_cancelled = False
+
+    def cancel():
+        assert window._import_guard.is_active
+        assert window._project is not None
+        assert window._captions
+        assert window._words
+        assert window._segments
+        worker._is_cancelled = True
+
+    worker.cancel.side_effect = cancel
+    window._import_worker_ref = worker
+
+    window._on_import_watchdog()
+
+    worker.cancel.assert_called_once_with()
+    assert not window._import_guard.is_active
+    assert window._project is None
+
+
+@patch("app.ui.main_window.QMessageBox")
 def test_watchdog_allows_new_import_after_recovery(mock_msgbox):
     """After watchdog fires, a new import must be startable."""
     window = _make_window()

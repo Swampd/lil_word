@@ -3,9 +3,9 @@ from app.ui.main_window import _TranscribeWorker
 from app.utils.settings import Settings
 from app.models.project import Project
 
-@patch("app.ui.main_window.transcribe")
-@patch("app.ui.main_window.generate_captions")
-@patch("app.ui.main_window.refine_timing")
+@patch("app.services.caption_job.transcription_service.transcribe")
+@patch("app.services.caption_job.caption_engine.generate_captions")
+@patch("app.services.caption_job.alignment_service.refine_timing")
 def test_transcribe_worker_forwards_settings(mock_refine, mock_generate_captions, mock_transcribe):
     mock_transcribe.return_value = ([], [])
     mock_generate_captions.return_value = []

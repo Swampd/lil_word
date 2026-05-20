@@ -91,7 +91,7 @@ def transcribe(
                     start_ms=int(w.start * 1000),
                     end_ms=int(w.end * 1000),
                     text=w.word.strip(),
-                    confidence=round(w.probability, 4) if w.probability else 1.0,
+                    confidence=round(w.probability, 4) if w.probability is not None else 1.0,
                     idx=word_idx,
                 ))
                 word_idx += 1
