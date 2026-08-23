@@ -57,7 +57,7 @@ _CEA608_COLOR_MAP = {
 }
 
 
-def _format_timecode(ms: int, fps: int = 30) -> str:
+def _format_timecode(ms: int, fps: int) -> str:
     """Format milliseconds to MCC SMPTE timecode 'HH:MM:SS:FF'."""
     val = max(0, ms)
     total_seconds, remainder_ms = divmod(val, 1000)
@@ -134,7 +134,8 @@ class MCCExporter(BaseTextExporter):
     CueStyle / CueRegion field mappings.
     """
 
-    def generate(self, cues: list[Cue]) -> str:
+    def generate(self, cues: list[Cue], fps: int = 30) -> str:
+        fps = max(1, int(fps))
         now = datetime.now()
         export_uuid = uuid.uuid4().hex[:16]
 
@@ -152,7 +153,7 @@ class MCCExporter(BaseTextExporter):
         lines.append(f'Creation Date={now.strftime("%Y-%m-%d")}')
         lines.append(f'Creation Time={now.strftime("%H:%M:%S")}')
         lines.append('')
-        lines.append('Time Code Rate=30')
+        lines.append(f'Time Code Rate={fps}')
         lines.append('')
         lines.append('////////////////////////////////////////////////////////////////////////////////////')
         lines.append('// Caption Data')
@@ -160,8 +161,8 @@ class MCCExporter(BaseTextExporter):
         lines.append('')
 
         for cue in cues:
-            tc_in = _format_timecode(cue.start)
-            tc_out = _format_timecode(cue.end)
+            tc_in = _format_timecode(cue.start, fps=fps)
+            tc_out = _format_timecode(cue.end, fps=fps)
             caption_data = _encode_caption_data(cue.text)
             style_codes = _build_style_preamble(cue.style)
 

@@ -386,6 +386,6 @@ def _wrap_text(text: str, max_cpl: int) -> str:
 
 def _count_lines(text: str, max_cpl: int) -> int:
     """Estimate how many lines a text would need."""
-    if len(text) <= max_cpl:
-        return 1
-    return (len(text) // max_cpl) + 1
+    if not text:
+        return 0
+    return (len(text) + max_cpl - 1) // max_cpl

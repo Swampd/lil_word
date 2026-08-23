@@ -1,11 +1,14 @@
 """Application settings and defaults."""
 
 import json
+import logging
 import os
+from datetime import datetime
 from pathlib import Path
 
 _SETTINGS_DIR = Path(os.environ.get("APPDATA", Path.home())) / "lil_word"
 _SETTINGS_FILE = _SETTINGS_DIR / "settings.json"
+_LOGGER = logging.getLogger(__name__)
 
 _DEFAULTS = {
     "whisper_model": "base",
@@ -29,6 +32,8 @@ _DEFAULTS = {
     "export_text_align": "center",
     "export_region_origin": "10% 80%",
     "export_region_extent": "80% 15%",
+    "ebu_stl_fps": 25,
+    "mcc_fps": 30,
 }
 
 
@@ -47,13 +52,44 @@ class Settings:
         self._load()
 
     def _load(self):
-        if self._file.exists():
+        if not self._file.exists():
+            return
+
+        try:
+            with open(self._file, "r", encoding="utf-8") as f:
+                stored = json.load(f)
+            if not isinstance(stored, dict):
+                raise ValueError("settings root must be a JSON object")
+            self._data.update(stored)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as exc:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup = self._file.with_name(
+                f"{self._file.stem}.invalid-{timestamp}{self._file.suffix}"
+            )
+            suffix = 1
+            while backup.exists():
+                backup = self._file.with_name(
+                    f"{self._file.stem}.invalid-{timestamp}-{suffix}{self._file.suffix}"
+                )
+                suffix += 1
+
             try:
-                with open(self._file, "r", encoding="utf-8") as f:
-                    stored = json.load(f)
-                self._data.update(stored)
-            except Exception:
-                pass
+                self._file.replace(backup)
+                _LOGGER.error(
+                    "Invalid settings file moved to %s; using defaults: %s",
+                    backup,
+                    exc,
+                )
+            except OSError:
+                _LOGGER.exception(
+                    "Could not back up invalid settings file %s; using defaults: %s",
+                    self._file,
+                    exc,
+                )
+        except OSError:
+            _LOGGER.exception("Could not read settings file %s; using defaults", self._file)
+        except Exception:
+            _LOGGER.exception("Unexpected error loading settings file %s; using defaults", self._file)
 
     def save(self):
         self._dir.mkdir(parents=True, exist_ok=True)

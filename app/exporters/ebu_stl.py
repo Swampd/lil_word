@@ -15,7 +15,7 @@ from .base import BaseBinaryExporter
 from app.models.cue import Cue
 
 
-def _format_timecode(ms: int, fps: int = 25) -> bytes:
+def _format_timecode(ms: int, fps: int) -> bytes:
     """Format milliseconds to EBU STL timecode bytes (HH, MM, SS, FF)."""
     val = max(0, ms)
     total_seconds, remainder_ms = divmod(val, 1000)
@@ -23,6 +23,11 @@ def _format_timecode(ms: int, fps: int = 25) -> bytes:
     hours, minutes = divmod(minutes, 60)
     frames = int(remainder_ms * fps / 1000)
     return bytes([hours % 100, minutes, seconds, frames])
+
+
+def _build_gsi_code(fps: int) -> bytes:
+    """Build a best-effort STL Disk Format Code for the provided frame rate."""
+    return f"STL{fps:02d}.01".encode("ascii")[:8].ljust(8, b" ")
 
 
 def _encode_text_field(text: str, max_bytes: int = 112) -> bytes:
@@ -56,22 +61,23 @@ class EBUSTLExporter(BaseBinaryExporter):
     GSI header followed by 128-byte TTI records for each cue.
     """
 
-    def generate(self, cues: list[Cue]) -> bytes:
+    def generate(self, cues: list[Cue], fps: int = 25) -> bytes:
         """Generate EBU STL binary content."""
-        gsi = self._build_gsi(len(cues))
+        fps = max(1, int(fps))
+        gsi = self._build_gsi(len(cues), fps)
         tti_blocks = []
         for index, cue in enumerate(cues):
-            tti_blocks.append(self._build_tti(index, cue))
+            tti_blocks.append(self._build_tti(index, cue, fps))
         return gsi + b''.join(tti_blocks)
 
-    def _build_gsi(self, subtitle_count: int) -> bytes:
+    def _build_gsi(self, subtitle_count: int, fps: int) -> bytes:
         """Build the 1024-byte GSI (General Subtitle Information) block."""
         gsi = bytearray(1024)
 
         # Code Page Number (CPN) — 850 (Multilingual)
         gsi[0:3] = b'850'
         # Disk Format Code (DFC) — STL25.01 (25fps)
-        gsi[3:11] = b'STL25.01'
+        gsi[3:11] = _build_gsi_code(fps)
         # Display Standard Code (DSC) — Level 1 Teletext
         gsi[11:12] = b'1'
         # Character Code Table (CCT) — 00 = Latin
@@ -118,7 +124,7 @@ class EBUSTLExporter(BaseBinaryExporter):
 
         return bytes(gsi)
 
-    def _build_tti(self, index: int, cue: Cue) -> bytes:
+    def _build_tti(self, index: int, cue: Cue, fps: int) -> bytes:
         """Build a single 128-byte TTI (Teletext Information) block."""
         tti = bytearray(128)
 
@@ -131,9 +137,9 @@ class EBUSTLExporter(BaseBinaryExporter):
         # Cumulative Status (CS) — 1 byte (0x00 = not cumulative)
         tti[4] = 0x00
         # Time Code In (TCI) — 4 bytes
-        tti[5:9] = _format_timecode(cue.start)
+        tti[5:9] = _format_timecode(cue.start, fps=fps)
         # Time Code Out (TCO) — 4 bytes
-        tti[9:13] = _format_timecode(cue.end)
+        tti[9:13] = _format_timecode(cue.end, fps=fps)
         # Vertical Position (VP) — 1 byte (row 20 for bottom placement)
         tti[13] = 20
         # Justification Code (JC) — 1 byte (0x02 = centered)

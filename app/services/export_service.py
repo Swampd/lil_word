@@ -11,6 +11,15 @@ from app.utils.timecode import ms_to_srt_time, ms_to_ass_time
 from app.services import media_service
 
 
+def _coerce_export_fps(value, default: int) -> int:
+    """Resolve a positive integer frame rate from untrusted input."""
+    try:
+        fps = int(value)
+    except (TypeError, ValueError):
+        return default
+    return fps if fps > 0 else default
+
+
 def export_srt(captions: list[Caption], out_path: str) -> str:
     """Write captions to an SRT file."""
     lines: list[str] = []
@@ -125,19 +134,39 @@ def export_smpte_tt(captions: list[Caption], out_path: str, settings=None) -> st
     return out_path
 
 
-def export_ebu_stl(captions: list[Caption], out_path: str, settings=None) -> str:
+def export_ebu_stl(
+    captions: list[Caption],
+    out_path: str,
+    settings=None,
+    fps: int | None = None,
+) -> str:
     """Export captions to EBU STL binary format using the additive Exporter framework."""
     from app.exporters.ebu_stl import EBUSTLExporter
     cues = EBUSTLExporter.convert_captions(captions, settings=settings)
-    content = EBUSTLExporter().generate(cues)
+    source_fps = (
+        _coerce_export_fps(fps, _coerce_export_fps(settings.get("ebu_stl_fps"), 25))
+        if settings is not None else
+        _coerce_export_fps(fps, 25)
+    )
+    content = EBUSTLExporter().generate(cues, fps=source_fps)
     Path(out_path).write_bytes(content)
     return out_path
 
 
-def export_mcc(captions: list[Caption], out_path: str, settings=None) -> str:
+def export_mcc(
+    captions: list[Caption],
+    out_path: str,
+    settings=None,
+    fps: int | None = None,
+) -> str:
     """Export captions to MCC format using the additive Exporter framework."""
     from app.exporters.mcc import MCCExporter
     cues = MCCExporter.convert_captions(captions, settings=settings)
-    content = MCCExporter().generate(cues)
+    source_fps = (
+        _coerce_export_fps(fps, _coerce_export_fps(settings.get("mcc_fps"), 30))
+        if settings is not None else
+        _coerce_export_fps(fps, 30)
+    )
+    content = MCCExporter().generate(cues, fps=source_fps)
     Path(out_path).write_text(content, encoding="utf-8")
     return out_path

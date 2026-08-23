@@ -56,6 +56,59 @@ def _get_ffprobe() -> str:
     return _resolve_tool("ffprobe")
 
 
+def _parse_fps_value(value) -> float | None:
+    """Parse a ffprobe frame-rate value into a float."""
+    if value in (None, "", "0", "0/0", "unknown"):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return None
+        return num if num > 0 else None
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+    if "/" in text:
+        try:
+            num_s, den_s = text.split("/", 1)
+            num = float(num_s)
+            den = float(den_s)
+        except (TypeError, ValueError):
+            return None
+        if den <= 0:
+            return None
+        if num <= 0:
+            return None
+        return num / den
+
+    try:
+        num = float(text)
+    except (TypeError, ValueError):
+        return None
+    return num if num > 0 else None
+
+
+def get_video_fps(path: str) -> int | None:
+    """Return integer FPS for the first video stream, or None when unavailable."""
+    info = probe_media(path)
+    for s in info.get("streams", []):
+        if s.get("codec_type") != "video":
+            continue
+        for key in ("avg_frame_rate", "r_frame_rate", "time_base"):
+            fps = _parse_fps_value(s.get(key))
+            if fps is None:
+                continue
+            # Prefer sane, positive integer conversion for framecode output.
+            fps_int = int(round(fps))
+            if fps_int > 0:
+                return fps_int
+    return None
+
+
 def _run(
     cmd: list[str],
     check: bool = True,

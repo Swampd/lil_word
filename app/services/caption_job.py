@@ -72,6 +72,7 @@ class CaptionMediaInfo:
     proxy_path: str
     media_duration_ms: int
     has_video: bool
+    media_fps: int | None = None
 
 
 def run_caption_job(
@@ -192,6 +193,7 @@ def prepare_caption_media(
     _raise_if_cancelled(cancel_check)
     _emit(progress_callback, "probing_media", "Probing media")
     duration_ms = media_service.get_duration_ms(input_path, cancel_check=cancel_check)
+    media_fps = media_service.get_video_fps(input_path)
 
     _raise_if_cancelled(cancel_check)
     has_video = media_service.has_video_stream(input_path, cancel_check=cancel_check)
@@ -215,6 +217,7 @@ def prepare_caption_media(
         proxy_path=proxy_path,
         media_duration_ms=duration_ms,
         has_video=has_video,
+        media_fps=media_fps,
     )
 
 

@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QDialogButtonBox,
     QComboBox, QLineEdit, QGroupBox, QLabel, QMessageBox,
     QHBoxLayout, QPushButton, QInputDialog, QWidget, QSplitter,
-    QFontComboBox, QColorDialog,
+    QFontComboBox, QColorDialog, QSpinBox,
 )
 from app.utils.settings import Settings, BUILTIN_PRESETS
 from app.validation.export_style_validators import (
@@ -288,6 +288,25 @@ class ExportSettingsDialog(QDialog):
         model_group.setLayout(model_form)
         forms_layout.addWidget(model_group)
 
+        # ── Legacy timecode rates group ─────────────────────────────────
+        legacy_group = QGroupBox("Legacy Export Timecode")
+        legacy_form = QFormLayout()
+
+        self._spin_ebu_stl_fps = QSpinBox()
+        self._spin_ebu_stl_fps.setRange(1, 120)
+        self._spin_ebu_stl_fps.setValue(int(self._settings.get("ebu_stl_fps", 25)))
+        self._spin_ebu_stl_fps.setToolTip("Frame rate used for EBU STL exports when media fps is unavailable.")
+        legacy_form.addRow("EBU STL FPS:", self._spin_ebu_stl_fps)
+
+        self._spin_mcc_fps = QSpinBox()
+        self._spin_mcc_fps.setRange(1, 120)
+        self._spin_mcc_fps.setValue(int(self._settings.get("mcc_fps", 30)))
+        self._spin_mcc_fps.setToolTip("Frame rate used for MCC exports when media fps is unavailable.")
+        legacy_form.addRow("MCC FPS:", self._spin_mcc_fps)
+
+        legacy_group.setLayout(legacy_form)
+        forms_layout.addWidget(legacy_group)
+
         # ── Note ─────────────────────────────────────────────────────────
         note = QLabel(
             "TTML / EBU-TT / SMPTE-TT: all style and placement defaults apply.\n"
@@ -557,6 +576,8 @@ class ExportSettingsDialog(QDialog):
         self._settings.set("export_text_align", self._cmb_text_align.currentText())
         self._settings.set("export_region_origin", region_origin)
         self._settings.set("export_region_extent", region_extent)
+        self._settings.set("ebu_stl_fps", self._spin_ebu_stl_fps.value())
+        self._settings.set("mcc_fps", self._spin_mcc_fps.value())
 
         self._settings.save()
         super().accept()

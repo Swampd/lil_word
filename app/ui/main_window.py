@@ -53,7 +53,7 @@ _IMPORT_WATCHDOG_SECS = 150
 
 class _ImportWorker(QObject):
     """Probes media and extracts audio in a background thread."""
-    finished = Signal(str, int, bool, str, str)  # audio_path, duration_ms, has_video, proxy_path, token
+    finished = Signal(str, int, bool, str, int, str)  # audio_path, duration_ms, has_video, proxy_path, media_fps, token
     error = Signal(str, str)
     progress = Signal(str)
     cancelled = Signal(str)
@@ -86,6 +86,7 @@ class _ImportWorker(QObject):
                 info.media_duration_ms,
                 info.has_video,
                 info.proxy_path,
+                info.media_fps if info.media_fps is not None else 0,
                 self._token,
             )
         except CancelledError:
@@ -193,6 +194,7 @@ class MainWindow(QMainWindow):
         self._segments: list[dict] = []
         self._worker_thread: Optional[QThread] = None
         self._media_duration_ms: int = 0
+        self._media_fps: int | None = None
         self._import_guard = ImportSessionGuard()
 
         self.setWindowTitle(f"Lil Word  [{_BUILD_LABEL}]")
@@ -431,6 +433,7 @@ class MainWindow(QMainWindow):
 
     def _open_project_by_id(self, project_id: int):
         """Open a specific project by its database ID."""
+        self._flush_caption_save()
         project = self._project_svc.load_project(project_id)
         if not project:
             QMessageBox.warning(self, "Not Found", "The selected project was not found.")
@@ -456,6 +459,8 @@ class MainWindow(QMainWindow):
         # Restore project state
         self._project = project
         self._media_duration_ms = project.media_duration_ms
+        self._media_fps = None
+        self._media_fps = self._resolve_media_fps()
         self._captions = self._project_svc.load_captions(project.id)
         self._words = self._project_svc.load_words(project.id)
         self._segments = self._project_svc.load_segments(project.id)
@@ -484,6 +489,7 @@ class MainWindow(QMainWindow):
         )
 
     def _load_media(self, path: str):
+        self._flush_caption_save()
         # Guard against reentrant imports
         token = self._import_guard.start_import(path)
         if token is None:
@@ -497,6 +503,7 @@ class MainWindow(QMainWindow):
         self._words = []
         self._segments = []
         self._media_duration_ms = 0
+        self._media_fps = None
         self._caption_panel.set_captions([])
         self._video_panel.set_captions([])
         self._video_panel.reset_to_empty()
@@ -546,7 +553,15 @@ class MainWindow(QMainWindow):
         self._import_watchdog.start(_IMPORT_WATCHDOG_SECS * 1000)
         log.info("[import] watchdog started  timeout=%ds", _IMPORT_WATCHDOG_SECS)
 
-    def _on_import_done(self, audio_path: str, duration_ms: int, has_video: bool, proxy_path: str, token: str):
+    def _on_import_done(
+        self,
+        audio_path: str,
+        duration_ms: int,
+        has_video: bool,
+        proxy_path: str,
+        media_fps: int,
+        token: str,
+    ):
         # Ignore stale completions from a superseded import
         if not self._import_guard.accept_done(token):
             log.warning("Ignoring stale import completion (token mismatch)")
@@ -563,6 +578,7 @@ class MainWindow(QMainWindow):
         self._project.media_duration_ms = duration_ms
         self._project.has_video = has_video
         self._media_duration_ms = duration_ms
+        self._media_fps = media_fps if media_fps > 0 else None
 
         preview_path = proxy_path if proxy_path else self._project.media_path
         self._video_panel.load_media(preview_path, has_video=has_video)
@@ -595,6 +611,7 @@ class MainWindow(QMainWindow):
         self._words = []
         self._segments = []
         self._media_duration_ms = 0
+        self._media_fps = None
         self._caption_panel.set_captions([])
         self._video_panel.set_captions([])
         self._video_panel.reset_to_empty()
@@ -617,6 +634,7 @@ class MainWindow(QMainWindow):
         self._words = []
         self._segments = []
         self._media_duration_ms = 0
+        self._media_fps = None
         self._caption_panel.set_captions([])
         self._video_panel.set_captions([])
         self._video_panel.reset_to_empty()
@@ -629,9 +647,7 @@ class MainWindow(QMainWindow):
         log.error("[import] WATCHDOG fired after %ds – treating import as failed",
                   _IMPORT_WATCHDOG_SECS)
 
-        worker = getattr(self, "_import_worker_ref", None)
-        if worker is not None and not getattr(worker, "_is_cancelled", False):
-            worker.cancel()
+        self._shutdown_import_worker(timeout_ms=1200)
 
         # Force-clear the guard so a new import can start
         current_token = self._import_guard.token
@@ -648,6 +664,7 @@ class MainWindow(QMainWindow):
         self._words = []
         self._segments = []
         self._media_duration_ms = 0
+        self._media_fps = None
         self._caption_panel.set_captions([])
         self._video_panel.set_captions([])
         self._video_panel.reset_to_empty()
@@ -1032,7 +1049,13 @@ class MainWindow(QMainWindow):
             self, "Export EBU STL", default_name, "EBU STL Files (*.stl)")
         if path:
             from app.services.export_service import export_ebu_stl
-            export_ebu_stl(self._captions, path, settings=self._settings)
+            export_fps = self._resolve_media_fps()
+            export_ebu_stl(
+                self._captions,
+                path,
+                settings=self._settings,
+                fps=export_fps,
+            )
             self._set_status(f"Exported EBU STL → {Path(path).name}")
 
     @Slot()
@@ -1046,7 +1069,13 @@ class MainWindow(QMainWindow):
             self, "Export MCC", default_name, "MCC Files (*.mcc)")
         if path:
             from app.services.export_service import export_mcc
-            export_mcc(self._captions, path, settings=self._settings)
+            export_fps = self._resolve_media_fps()
+            export_mcc(
+                self._captions,
+                path,
+                settings=self._settings,
+                fps=export_fps,
+            )
             self._set_status(f"Exported MCC → {Path(path).name}")
 
     @Slot()
@@ -1102,12 +1131,58 @@ class MainWindow(QMainWindow):
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
+    def _shutdown_import_worker(self, timeout_ms: int = 1000) -> None:
+        """Stop the active import worker thread and wait briefly before returning."""
+        worker = getattr(self, "_import_worker_ref", None)
+        thread = getattr(self, "_import_thread", None)
+
+        if worker is not None and not getattr(worker, "_is_cancelled", False):
+            worker.cancel()
+
+        if thread is None:
+            return
+
+        # Ask the thread to stop quickly; bound the wait so UI remains responsive.
+        thread.requestInterruption()
+        if thread.isRunning():
+            thread.quit()
+            if not thread.wait(timeout_ms):
+                log.warning(
+                    "[import] Import thread did not stop within %dms; terminating.",
+                    timeout_ms,
+                )
+                thread.terminate()
+                if not thread.wait(max(timeout_ms, 1000)):
+                    log.warning("[import] Import thread failed to terminate.")
+        else:
+            # No longer running, but ensure any pending event loop wakeups are flushed.
+            thread.requestInterruption()
+            thread.quit()
+
+        self._import_thread = None
+        self._import_worker_ref = None
+
     def _on_captions_edited(self):
         """Called when captions change in the editor – normalize and persist."""
         self._captions = self._caption_panel.get_captions()
         self._normalize_current_captions()
         self._caption_panel.set_captions(self._captions)
         self._video_panel.set_captions(self._captions)
+        self._schedule_caption_save()
+
+    def _schedule_caption_save(self):
+        """Coalesce rapid caption edits into one persistence operation."""
+        if not hasattr(self, "_caption_save_timer"):
+            self._caption_save_timer = QTimer(self)
+            self._caption_save_timer.setSingleShot(True)
+            self._caption_save_timer.timeout.connect(self._flush_caption_save)
+        self._caption_save_timer.start(500)
+
+    def _flush_caption_save(self):
+        """Persist pending caption edits immediately at a commit boundary."""
+        timer = getattr(self, "_caption_save_timer", None)
+        if timer is not None:
+            timer.stop()
         self._save_captions()
 
     def _on_split_feedback(self, reason: str):
@@ -1118,8 +1193,7 @@ class MainWindow(QMainWindow):
     def _on_cancel_job(self):
         self._set_status("Cancelling job…")
         self._btn_cancel_job.setEnabled(False)
-        if getattr(self, '_import_worker_ref', None) and not self._import_worker_ref._is_cancelled:
-            self._import_worker_ref.cancel()
+        self._shutdown_import_worker()
         if getattr(self, '_worker_ref', None) and not self._worker_ref._is_cancelled:
             self._worker_ref.cancel()
         if getattr(self, '_export_worker_ref', None) and not self._export_worker_ref._is_cancelled:
@@ -1188,7 +1262,24 @@ class MainWindow(QMainWindow):
         media_path = self._project.media_path if self._project else ""
         return build_export_name(media_path, suffix)
 
+    def _resolve_media_fps(self) -> int | None:
+        """Return cached FPS from current media if available, else probe media once."""
+        if self._media_fps and self._media_fps > 0:
+            return self._media_fps
+
+        if not self._project or not self._project.media_path:
+            return None
+
+        try:
+            fps = media_service.get_video_fps(self._project.media_path)
+        except Exception as exc:
+            log.warning("Unable to probe media FPS from %s: %s", self._project.media_path, exc)
+            return None
+
+        self._media_fps = fps
+        return fps
+
     def closeEvent(self, event):
-        self._save_captions()
+        self._flush_caption_save()
         self._project_svc.close()
         super().closeEvent(event)
