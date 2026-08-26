@@ -817,8 +817,8 @@ class MainWindow(QMainWindow):
         # Find words that overlap the selected range (±200ms tolerance)
         range_words = [
             w for w in self._words
-            if w.start_ms >= range_start - 200
-            and w.end_ms <= range_end + 200
+            if w.start_ms <= range_end + 200
+            and w.end_ms >= range_start - 200
         ]
 
         # Find segments that overlap the selected range

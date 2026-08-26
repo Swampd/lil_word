@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal, Slot, QModelIndex
@@ -257,25 +258,27 @@ class CaptionPanel(QWidget):
             )
             return
 
-        # Split text roughly proportionally
-        words = cap.text.split()
-        if len(words) < 2:
+        # Split at a token boundary without rebuilding the text. Keeping the
+        # original slices preserves repeated spaces and explicit line breaks.
+        tokens = list(re.finditer(r"\S+", cap.text, flags=re.UNICODE))
+        if len(tokens) < 2:
             self.split_feedback.emit(
                 "Split requires at least two words in the caption."
             )
             return
         frac = (ph - cap.start_ms) / (cap.end_ms - cap.start_ms)
-        split_word = max(1, min(len(words) - 1, int(len(words) * frac)))
+        split_word = max(1, min(len(tokens) - 1, int(len(tokens) * frac)))
+        split_at = tokens[split_word].start()
 
         cap1 = Caption(
             start_ms=cap.start_ms,
             end_ms=ph,
-            text=" ".join(words[:split_word]),
+            text=cap.text[:split_at],
         )
         cap2 = Caption(
             start_ms=ph,
             end_ms=cap.end_ms,
-            text=" ".join(words[split_word:]),
+            text=cap.text[split_at:],
         )
         self._captions[idx:idx + 1] = [cap1, cap2]
         self._refresh_table()
@@ -296,7 +299,9 @@ class CaptionPanel(QWidget):
                 "Merge requires contiguous (adjacent) captions selected."
             )
             return
-        merged_text = " ".join(self._captions[i].text for i in sel)
+        merged_text = self._merge_caption_texts(
+            self._captions[i].text for i in sel
+        )
         merged = Caption(
             start_ms=self._captions[sel[0]].start_ms,
             end_ms=self._captions[sel[-1]].end_ms,
@@ -305,6 +310,16 @@ class CaptionPanel(QWidget):
         self._captions[sel[0]:sel[-1] + 1] = [merged]
         self._refresh_table()
         self.captions_changed.emit()
+
+    @staticmethod
+    def _merge_caption_texts(texts) -> str:
+        """Join caption text without discarding existing whitespace."""
+        merged = ""
+        for text in texts:
+            if merged and text and not merged[-1].isspace() and not text[0].isspace():
+                merged += " "
+            merged += text
+        return merged
 
     @Slot()
     def _show_context_menu(self, pos):
