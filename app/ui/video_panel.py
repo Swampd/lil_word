@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from bisect import bisect_right
 from pathlib import Path
 from typing import Optional
 
@@ -275,6 +276,9 @@ class VideoPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._captions: list[Caption] = []
+        self._caption_starts: list[int] = []
+        self._subtitle_index = 0
+        self._last_subtitle_position: int | None = None
         self._duration_ms: int = 0
         self._media_loaded = False
 
@@ -359,6 +363,9 @@ class VideoPanel(QWidget):
 
     def set_captions(self, captions: list[Caption]):
         self._captions = captions
+        self._caption_starts = [caption.start_ms for caption in captions]
+        self._subtitle_index = 0
+        self._last_subtitle_position = None
 
     def seek_to(self, ms: int):
         self._player.setPosition(ms)
@@ -376,6 +383,9 @@ class VideoPanel(QWidget):
         self._player.stop()
         self._player.setSource(QUrl())
         self._captions = []
+        self._caption_starts = []
+        self._subtitle_index = 0
+        self._last_subtitle_position = None
         self._duration_ms = 0
         self._slider.setRange(0, 0)
         self._lbl_time.setText("00:00.0 / 00:00.0")
@@ -421,10 +431,26 @@ class VideoPanel(QWidget):
     def _update_subtitle(self):
         pos = self._player.position()
         text = ""
-        for cap in self._captions:
+
+        # Normal playback is monotonic, so advance the cursor past captions
+        # that have ended instead of rescanning the entire list. A backward
+        # seek resets the cursor with binary search over cached start times.
+        if self._last_subtitle_position is None or pos < self._last_subtitle_position:
+            self._subtitle_index = max(
+                0, bisect_right(self._caption_starts, pos) - 1
+            )
+        while (
+            self._subtitle_index < len(self._captions)
+            and self._captions[self._subtitle_index].end_ms < pos
+        ):
+            self._subtitle_index += 1
+
+        if self._subtitle_index < len(self._captions):
+            cap = self._captions[self._subtitle_index]
             if cap.start_ms <= pos <= cap.end_ms:
                 text = cap.text
-                break
+
+        self._last_subtitle_position = pos
         self._overlay.set_subtitle(text)
 
     def set_style_settings(self, settings: Settings):

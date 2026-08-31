@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QFontComboBox, QColorDialog, QSpinBox,
 )
 from app.utils.settings import Settings, BUILTIN_PRESETS
+from app.utils.colors import canonicalize_hex_color
 from app.validation.export_style_validators import (
     validate_font_size, validate_fill_color, validate_background_color,
     validate_region_origin, validate_region_extent,
@@ -387,7 +388,7 @@ class ExportSettingsDialog(QDialog):
         color = QColorDialog.getColor(initial_color, self, "Pick Color", QColorDialog.ShowAlphaChannel)
         if color.isValid():
             if color.alpha() < 255:
-                line_edit.setText(color.name(QColor.HexArgb))
+                line_edit.setText(color.name(QColor.HexRgba))
             else:
                 line_edit.setText(color.name())
 
@@ -511,8 +512,12 @@ class ExportSettingsDialog(QDialog):
         return {
             "export_font_family": self._txt_font_family.currentFont().family() or "Arial",
             "export_font_size": self._txt_font_size.text().strip() or "100%",
-            "export_fill_color": self._txt_fill_color.text().strip() or "#FFFFFF",
-            "export_background_color": self._txt_bg_color.text().strip() or "#00000000",
+            "export_fill_color": canonicalize_hex_color(
+                self._txt_fill_color.text().strip() or "#FFFFFF"
+            ),
+            "export_background_color": canonicalize_hex_color(
+                self._txt_bg_color.text().strip() or "#00000000"
+            ),
             "export_text_align": self._cmb_text_align.currentText(),
             "export_region_origin": self._txt_region_origin.text().strip() or "10% 80%",
             "export_region_extent": self._txt_region_extent.text().strip() or "80% 15%",

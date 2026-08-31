@@ -9,6 +9,7 @@ Contains common logic used by TTML/DFXP, EBU-TT, and SMPTE-TT writers:
 import xml.sax.saxutils
 
 from app.models.cue import Cue
+from app.utils.colors import normalize_hex_color
 
 
 def format_time(ms: int) -> str:
@@ -86,8 +87,8 @@ def render_style_attrs(style_obj) -> str:
     font_family = _esc_attr(str(style_obj.font_family))
     font_size = _esc_attr(str(style_obj.font_size))
     text_align = _esc_attr(str(style_obj.text_align))
-    fill_color = _esc_attr(str(style_obj.fill_color))
-    bg_color = _esc_attr(str(style_obj.background_color))
+    fill_color = _esc_attr(normalize_hex_color(style_obj.fill_color, "#FFFFFF"))
+    bg_color = _esc_attr(normalize_hex_color(style_obj.background_color, "#00000000"))
     font_style = "italic" if style_obj.italic else "normal"
     font_weight = "bold" if style_obj.bold else "normal"
     text_decoration = "underline" if style_obj.underline else "none"
