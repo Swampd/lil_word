@@ -543,6 +543,11 @@ class MainWindow(QMainWindow):
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         worker.cancelled.connect(thread.quit)
+        thread.finished.connect(
+            lambda t=thread: self._clear_worker_thread_refs(
+                t, "_import_thread", "_import_worker_ref"
+            )
+        )
         thread.finished.connect(thread.deleteLater)
 
         self._import_thread = thread
@@ -708,6 +713,11 @@ class MainWindow(QMainWindow):
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         worker.cancelled.connect(thread.quit)
+        thread.finished.connect(
+            lambda t=thread: self._clear_worker_thread_refs(
+                t, "_worker_thread", "_worker_ref"
+            )
+        )
         thread.finished.connect(thread.deleteLater)
 
         self._worker_thread = thread
@@ -1108,6 +1118,11 @@ class MainWindow(QMainWindow):
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         worker.cancelled.connect(thread.quit)
+        thread.finished.connect(
+            lambda t=thread: self._clear_worker_thread_refs(
+                t, "_export_thread", "_export_worker_ref"
+            )
+        )
         thread.finished.connect(thread.deleteLater)
 
         self._export_thread = thread
@@ -1131,36 +1146,77 @@ class MainWindow(QMainWindow):
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
-    def _shutdown_import_worker(self, timeout_ms: int = 1000) -> None:
-        """Stop the active import worker thread and wait briefly before returning."""
-        worker = getattr(self, "_import_worker_ref", None)
-        thread = getattr(self, "_import_thread", None)
+    def _clear_worker_thread_refs(
+        self, thread: QThread, thread_attr: str, worker_attr: str
+    ) -> None:
+        """Release worker references when a QThread has completed normally."""
+        if getattr(self, thread_attr, None) is thread:
+            setattr(self, thread_attr, None)
+            setattr(self, worker_attr, None)
+
+    def _shutdown_thread_worker(
+        self,
+        thread_attr: str,
+        worker_attr: str,
+        label: str,
+        timeout_ms: int = 1000,
+    ) -> None:
+        """Cancel and stop one worker thread without blocking indefinitely."""
+        worker = getattr(self, worker_attr, None)
+        thread = getattr(self, thread_attr, None)
 
         if worker is not None and not getattr(worker, "_is_cancelled", False):
             worker.cancel()
 
         if thread is None:
+            setattr(self, thread_attr, None)
+            setattr(self, worker_attr, None)
             return
 
-        # Ask the thread to stop quickly; bound the wait so UI remains responsive.
+        # Interruption is advisory; the worker's cancellation flag is the primary
+        # mechanism. quit() wakes a worker event loop if it is still running.
         thread.requestInterruption()
         if thread.isRunning():
             thread.quit()
             if not thread.wait(timeout_ms):
                 log.warning(
-                    "[import] Import thread did not stop within %dms; terminating.",
+                    "[%s] worker thread did not stop within %dms; terminating.",
+                    label,
                     timeout_ms,
                 )
                 thread.terminate()
                 if not thread.wait(max(timeout_ms, 1000)):
-                    log.warning("[import] Import thread failed to terminate.")
+                    log.warning("[%s] worker thread failed to terminate.", label)
         else:
-            # No longer running, but ensure any pending event loop wakeups are flushed.
-            thread.requestInterruption()
             thread.quit()
 
-        self._import_thread = None
-        self._import_worker_ref = None
+        setattr(self, thread_attr, None)
+        setattr(self, worker_attr, None)
+
+    def _shutdown_import_worker(self, timeout_ms: int = 1000) -> None:
+        """Stop the active import worker thread and wait briefly before returning."""
+        self._shutdown_thread_worker(
+            "_import_thread",
+            "_import_worker_ref",
+            "import",
+            timeout_ms=timeout_ms,
+        )
+
+    def _shutdown_all_workers(self, timeout_ms: int = 1200) -> None:
+        """Stop every long-running worker before shared resources are closed."""
+        self._shutdown_import_worker(timeout_ms=timeout_ms)
+        self._shutdown_thread_worker(
+            "_worker_thread",
+            "_worker_ref",
+            "transcription",
+            timeout_ms=timeout_ms,
+        )
+        self._shutdown_thread_worker(
+            "_export_thread",
+            "_export_worker_ref",
+            "export",
+            timeout_ms=timeout_ms,
+        )
 
     def _on_captions_edited(self):
         """Called when captions change in the editor – normalize and persist."""
@@ -1193,11 +1249,7 @@ class MainWindow(QMainWindow):
     def _on_cancel_job(self):
         self._set_status("Cancelling job…")
         self._btn_cancel_job.setEnabled(False)
-        self._shutdown_import_worker()
-        if getattr(self, '_worker_ref', None) and not self._worker_ref._is_cancelled:
-            self._worker_ref.cancel()
-        if getattr(self, '_export_worker_ref', None) and not self._export_worker_ref._is_cancelled:
-            self._export_worker_ref.cancel()
+        self._shutdown_all_workers()
 
     @Slot()
     def _on_job_cancelled(self):
@@ -1281,5 +1333,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._flush_caption_save()
+        self._shutdown_all_workers()
         self._project_svc.close()
         super().closeEvent(event)
