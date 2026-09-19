@@ -49,6 +49,13 @@ _BUILD_LABEL = "r94-2026-05-06"
 _IMPORT_WATCHDOG_SECS = 150
 
 
+def _connect_worker_lifecycle(worker: QObject) -> None:
+    """Delete a worker QObject after any terminal outcome."""
+    worker.finished.connect(worker.deleteLater)
+    worker.error.connect(worker.deleteLater)
+    worker.cancelled.connect(worker.deleteLater)
+
+
 # ── Worker for background media import ───────────────────────────────────────
 
 class _ImportWorker(QObject):
@@ -540,6 +547,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._on_import_done)
         worker.error.connect(self._on_import_error)
         worker.cancelled.connect(self._on_import_cancelled)
+        _connect_worker_lifecycle(worker)
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         worker.cancelled.connect(thread.quit)
@@ -710,6 +718,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._on_transcribe_done)
         worker.error.connect(self._on_transcribe_error)
         worker.cancelled.connect(self._on_job_cancelled)
+        _connect_worker_lifecycle(worker)
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         worker.cancelled.connect(thread.quit)
@@ -1115,6 +1124,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._on_export_done)
         worker.error.connect(self._on_export_error)
         worker.cancelled.connect(self._on_job_cancelled)
+        _connect_worker_lifecycle(worker)
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
         worker.cancelled.connect(thread.quit)
@@ -1221,8 +1231,24 @@ class MainWindow(QMainWindow):
     def _on_captions_edited(self):
         """Called when captions change in the editor – normalize and persist."""
         self._captions = self._caption_panel.get_captions()
+        before = [
+            (caption.start_ms, caption.end_ms, caption.text)
+            for caption in self._captions
+        ]
         self._normalize_current_captions()
-        self._caption_panel.set_captions(self._captions)
+        after = [
+            (caption.start_ms, caption.end_ms, caption.text)
+            for caption in self._captions
+        ]
+        if len(before) != len(after):
+            self._caption_panel.set_captions(self._captions)
+        else:
+            changed_rows = [
+                row
+                for row, (old, new) in enumerate(zip(before, after))
+                if old != new
+            ]
+            self._caption_panel.refresh_caption_rows(self._captions, changed_rows)
         self._video_panel.set_captions(self._captions)
         self._schedule_caption_save()
 

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 import re
-from typing import Optional
+from typing import Iterable, Optional
 
 from PySide6.QtCore import Qt, Signal, Slot, QModelIndex
 from PySide6.QtWidgets import (
@@ -30,6 +31,7 @@ class CaptionPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._captions: list[Caption] = []
+        self._active_caption_row: Optional[int] = None
         self._updating = False  # guard against re-entrant edits
 
         # --- Table ---
@@ -96,22 +98,80 @@ class CaptionPanel(QWidget):
 
     def set_captions(self, captions: list[Caption]):
         self._captions = captions
+        self._active_caption_row = None
         self._refresh_table()
 
     def get_captions(self) -> list[Caption]:
         return list(self._captions)
 
+    def refresh_caption_rows(
+        self,
+        captions: list[Caption],
+        rows: Iterable[int],
+    ) -> None:
+        """Refresh only changed caption rows without rebuilding the table."""
+        if len(captions) != self._table.rowCount():
+            self.set_captions(captions)
+            return
+
+        self._captions = captions
+        text_rows: list[int] = []
+        self._updating = True
+        try:
+            for row in sorted(set(rows)):
+                if not 0 <= row < len(captions):
+                    continue
+
+                caption = captions[row]
+                start_item = self._table.item(row, 0)
+                end_item = self._table.item(row, 1)
+                text_item = self._table.item(row, 2)
+
+                if start_item is None:
+                    self._table.setItem(row, 0, self._time_item(caption.start_ms))
+                else:
+                    start_item.setText(ms_to_display(caption.start_ms))
+
+                if end_item is None:
+                    self._table.setItem(row, 1, self._time_item(caption.end_ms))
+                else:
+                    end_item.setText(ms_to_display(caption.end_ms))
+
+                text_changed = text_item is None or text_item.text() != caption.text
+                if text_item is None:
+                    text_item = QTableWidgetItem(caption.text)
+                    text_item.setFlags(text_item.flags() | Qt.ItemIsEditable)
+                    text_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    self._table.setItem(row, 2, text_item)
+                else:
+                    text_item.setText(caption.text)
+                text_item.setToolTip(caption.text)
+
+                if text_changed:
+                    text_rows.append(row)
+        finally:
+            self._updating = False
+
+        for row in text_rows:
+            self._table.resizeRowToContents(row)
+
     def set_playhead(self, ms: int):
         """Update playhead position (used for split action)."""
         self._playhead_ms = ms
-        # Highlight current caption row
-        for i, cap in enumerate(self._captions):
-            if cap.start_ms <= ms <= cap.end_ms:
-                if not self._table.selectionModel().isSelected(
-                    self._table.model().index(i, 0)
-                ):
-                    self._table.selectRow(i)
-                break
+        row = bisect_right(
+            self._captions,
+            ms,
+            key=lambda caption: caption.start_ms,
+        ) - 1
+        if row < 0 or ms > self._captions[row].end_ms:
+            row = None
+
+        if row == self._active_caption_row:
+            return
+
+        self._active_caption_row = row
+        if row is not None:
+            self._table.selectRow(row)
 
     def highlight_row(self, index: int):
         if 0 <= index < self._table.rowCount():

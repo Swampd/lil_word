@@ -4,8 +4,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QElapsedTimer, Qt
+from PySide6.QtCore import QCoreApplication, QElapsedTimer, QEvent, QObject, Qt, Signal
 
+from app.ui import main_window
 from app.ui.main_window import MainWindow
 from app.utils.settings import Settings
 from app.services.project_service import ProjectService
@@ -16,6 +17,31 @@ def _ensure_app():
     if not app:
         app = QApplication(sys.argv)
     return app
+
+
+def test_terminal_worker_signals_schedule_worker_deletion():
+    """Each terminal outcome should release the worker QObject via Qt."""
+    _ensure_app()
+
+    class Worker(QObject):
+        finished = Signal(str)
+        error = Signal(str)
+        cancelled = Signal()
+
+    for signal_name, args in (
+        ("finished", ("done",)),
+        ("error", ("failed",)),
+        ("cancelled", ()),
+    ):
+        worker = Worker()
+        destroyed = []
+        worker.destroyed.connect(lambda: destroyed.append(True))
+
+        main_window._connect_worker_lifecycle(worker)
+        getattr(worker, signal_name).emit(*args)
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+        assert destroyed == [True]
 
 @skip_no_ffmpeg
 @patch("app.ui.main_window.QMessageBox.critical")
@@ -901,18 +927,17 @@ def test_cancel_import_during_probe_restores_ui():
     try:
         window = MainWindow(settings, project_svc)
         
-        # We want to mock get_duration_ms to simulate a slow probe that checks cancel_check
-        def mock_get_duration_ms(path, cancel_check=None):
+        # Simulate one slow ffprobe call that periodically checks cancellation.
+        def mock_probe_media(path, cancel_check=None):
             # Simulate a slow probe that eventually checks cancel_check
             for _ in range(50):
                 if cancel_check and cancel_check():
                     raise CancelledError("Import cancelled.")
                 time.sleep(0.01)
-            return 1000
+            return {"format": {"duration": "1.0"}, "streams": []}
 
         with patch("app.ui.main_window.QFileDialog.getOpenFileName", return_value=(str(dummy_media), "")), \
-             patch("app.ui.main_window.media_service.get_duration_ms", side_effect=mock_get_duration_ms), \
-             patch("app.ui.main_window.media_service.has_video_stream", return_value=True), \
+             patch("app.ui.main_window.media_service.probe_media", side_effect=mock_probe_media), \
              patch("app.ui.main_window.media_service.extract_audio_wav") as mock_extract:
             
             # Use real QThread and Worker to prove real signaling
@@ -924,14 +949,15 @@ def test_cancel_import_during_probe_restores_ui():
             from PySide6.QtWidgets import QApplication
             QApplication.processEvents()
             time.sleep(0.05)
-            
+
             # Click cancel while the worker is in the mock probe phase
+            thread_ref = window._import_thread
             window._btn_cancel_job.click()
             
             # Wait for worker thread to finish processing the cancellation
             for _ in range(50):
                 QApplication.processEvents()
-                if not window._import_thread.isRunning():
+                if not thread_ref.isRunning():
                     break
                 time.sleep(0.05)
                 
@@ -1076,17 +1102,21 @@ def test_import_proxy_fallback_generation():
     try:
         window = MainWindow(settings, project_svc)
         
-        def mock_needs_proxy(path, cancel_check=None):
-            return True
-            
         def mock_generate_proxy(media_path, proxy_path, width=640, cancel_check=None):
             pass
 
+        probe_info = {
+            "format": {"duration": "5.0"},
+            "streams": [{
+                "codec_type": "video",
+                "codec_name": "prores",
+                "avg_frame_rate": "30/1",
+            }],
+        }
+
         with patch("app.ui.main_window.QFileDialog.getOpenFileName", return_value=(str(dummy_media), "")), \
-             patch("app.services.media_service.needs_proxy", side_effect=mock_needs_proxy), \
+             patch("app.services.media_service.probe_media", return_value=probe_info), \
              patch("app.services.media_service.generate_proxy", side_effect=mock_generate_proxy) as mock_gen_proxy, \
-             patch("app.services.media_service.get_duration_ms", return_value=5000), \
-             patch("app.services.media_service.has_video_stream", return_value=True), \
              patch("app.services.media_service.extract_audio_wav"), \
              patch.object(window._video_panel, 'load_media') as mock_load_media:
              
@@ -1171,9 +1201,6 @@ def test_cancel_during_proxy_generation_restores_ui():
     try:
         window = MainWindow(settings, project_svc)
         
-        def mock_needs_proxy(path, cancel_check=None):
-            return True
-            
         def mock_generate_proxy(media_path, proxy_path, width=640, cancel_check=None):
             # Simulate a slow generation that periodically checks cancel_check
             for _ in range(50):
@@ -1181,10 +1208,17 @@ def test_cancel_during_proxy_generation_restores_ui():
                     raise CancelledError("Import cancelled.")
                 time.sleep(0.01)
 
+        probe_info = {
+            "format": {"duration": "1.0"},
+            "streams": [{
+                "codec_type": "video",
+                "codec_name": "prores",
+                "avg_frame_rate": "30/1",
+            }],
+        }
+
         with patch("app.ui.main_window.QFileDialog.getOpenFileName", return_value=(str(dummy_media), "")), \
-             patch("app.ui.main_window.media_service.get_duration_ms", return_value=1000), \
-             patch("app.ui.main_window.media_service.has_video_stream", return_value=True), \
-             patch("app.ui.main_window.media_service.needs_proxy", side_effect=mock_needs_proxy), \
+             patch("app.ui.main_window.media_service.probe_media", return_value=probe_info), \
              patch("app.ui.main_window.media_service.generate_proxy", side_effect=mock_generate_proxy) as mock_gen_proxy, \
              patch("app.ui.main_window.media_service.extract_audio_wav") as mock_extract:
             
@@ -1196,20 +1230,21 @@ def test_cancel_during_proxy_generation_restores_ui():
             # Give the thread a moment to start the mock proxy generation
             QApplication.processEvents()
             time.sleep(0.05)
-            
+
             # Click cancel while the worker is inside mock_generate_proxy
-            window._btn_cancel_job.click()
-            
-            # Wait for worker thread to finish
             thread_ref = window._import_thread
+            window._btn_cancel_job.click()
+
+            # Wait for worker thread to finish
             timer = QElapsedTimer()
             timer.start()
             
             while thread_ref.isRunning() and timer.elapsed() < 10000:
                 QApplication.processEvents()
-                
+
             assert not thread_ref.isRunning(), "Import thread did not terminate within timeout"
-            
+            QApplication.processEvents()
+
             # Verify generate_proxy was called but extract_audio_wav was NOT
             mock_gen_proxy.assert_called_once()
             mock_extract.assert_not_called()

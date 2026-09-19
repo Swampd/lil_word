@@ -8,7 +8,7 @@ import time
 import shutil
 import sys
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, NamedTuple
 from app.utils.errors import CancelledError
 
 
@@ -92,21 +92,51 @@ def _parse_fps_value(value) -> float | None:
     return num if num > 0 else None
 
 
-def get_video_fps(path: str) -> int | None:
-    """Return integer FPS for the first video stream, or None when unavailable."""
-    info = probe_media(path)
-    for s in info.get("streams", []):
-        if s.get("codec_type") != "video":
-            continue
+class MediaProperties(NamedTuple):
+    """Media facts derived from a single ffprobe response."""
+
+    media_duration_ms: int
+    media_fps: int | None
+    has_video: bool
+    needs_proxy: bool
+
+
+def media_properties_from_probe(info: dict) -> MediaProperties:
+    """Derive duration, FPS, video presence, and proxy need from ffprobe JSON."""
+    duration_ms = int(float(info.get("format", {}).get("duration", 0)) * 1000)
+    video_streams = [
+        stream
+        for stream in info.get("streams", [])
+        if stream.get("codec_type") == "video"
+    ]
+
+    media_fps = None
+    for stream in video_streams:
         for key in ("avg_frame_rate", "r_frame_rate", "time_base"):
-            fps = _parse_fps_value(s.get(key))
+            fps = _parse_fps_value(stream.get(key))
             if fps is None:
                 continue
-            # Prefer sane, positive integer conversion for framecode output.
             fps_int = int(round(fps))
             if fps_int > 0:
-                return fps_int
-    return None
+                media_fps = fps_int
+                break
+        if media_fps is not None:
+            break
+
+    return MediaProperties(
+        media_duration_ms=duration_ms,
+        media_fps=media_fps,
+        has_video=bool(video_streams),
+        needs_proxy=any(
+            stream.get("codec_name", "") not in ["h264"]
+            for stream in video_streams
+        ),
+    )
+
+
+def get_video_fps(path: str) -> int | None:
+    """Return integer FPS for the first video stream, or None when unavailable."""
+    return media_properties_from_probe(probe_media(path)).media_fps
 
 
 def _run(
@@ -189,28 +219,19 @@ def probe_media(path: str, cancel_check: Optional[Callable[[], bool]] = None) ->
 def get_duration_ms(path: str, cancel_check: Optional[Callable[[], bool]] = None) -> int:
     """Return media duration in ms."""
     info = probe_media(path, cancel_check=cancel_check)
-    dur = float(info.get("format", {}).get("duration", 0))
-    return int(dur * 1000)
+    return media_properties_from_probe(info).media_duration_ms
 
 
 def has_video_stream(path: str, cancel_check: Optional[Callable[[], bool]] = None) -> bool:
     """Check if the file contains a video stream."""
     info = probe_media(path, cancel_check=cancel_check)
-    for s in info.get("streams", []):
-        if s.get("codec_type") == "video":
-            return True
-    return False
+    return media_properties_from_probe(info).has_video
 
 
 def needs_proxy(path: str, cancel_check: Optional[Callable[[], bool]] = None) -> bool:
     """Return True if the video codec is not optimal for native playback (e.g., anything but h264)."""
     info = probe_media(path, cancel_check=cancel_check)
-    for s in info.get("streams", []):
-        if s.get("codec_type") == "video":
-            codec = s.get("codec_name", "")
-            if codec not in ["h264"]:
-                return True
-    return False
+    return media_properties_from_probe(info).needs_proxy
 
 
 # ── Audio extraction ─────────────────────────────────────────────────────────

@@ -45,6 +45,20 @@ CREATE TABLE IF NOT EXISTS transcript_words (
 );
 """
 
+_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_projects_updated_at
+    ON projects (updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_captions_project_idx
+    ON captions (project_id, idx);
+
+CREATE INDEX IF NOT EXISTS idx_transcript_words_project_idx
+    ON transcript_words (project_id, idx);
+
+CREATE INDEX IF NOT EXISTS idx_transcript_segments_project_idx
+    ON transcript_segments (project_id, idx);
+"""
+
 
 class ProjectService:
     """Manages project persistence via SQLite."""
@@ -59,7 +73,12 @@ class ProjectService:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
         self._migrate()
+        self._ensure_indexes()
         self._conn.commit()
+
+    def _ensure_indexes(self):
+        """Create query indexes after all schema migrations are complete."""
+        self._conn.executescript(_INDEXES)
 
     def _migrate(self):
         """Apply schema migrations for columns/tables added after initial release."""

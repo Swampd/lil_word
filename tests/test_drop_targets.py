@@ -162,7 +162,7 @@ def test_stale_done_does_not_stop_watchdog(mock_msgbox):
     window._import_watchdog.start(150_000)
 
     # A stale completion from import A arrives
-    window._on_import_done("/fake/audio.wav", 1000, False, "", token_a)
+    window._on_import_done("/fake/audio.wav", 1000, False, "", 0, token_a)
 
     # Watchdog must still be running for import B
     assert window._import_watchdog.isActive()

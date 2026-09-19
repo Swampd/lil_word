@@ -69,7 +69,7 @@ def test_save_and_load_user_preset():
         assert "My Preset" in presets2
         assert presets2["My Preset"]["export_font_family"] == "Comic Sans"
     finally:
-        os.unlink(settings_file)
+        Path(settings_file).unlink(missing_ok=True)
 
 
 def test_delete_user_preset():
@@ -380,7 +380,7 @@ def test_save_as_rejects_builtin_name():
         # Should NOT be saved as a user preset
         assert builtin_name not in settings.get_style_presets()
     finally:
-        os.unlink(settings_file)
+        Path(settings_file).unlink(missing_ok=True)
 
 
 # ── Preview widget tests ─────────────────────────────────────────────────

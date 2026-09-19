@@ -192,16 +192,16 @@ def prepare_caption_media(
 
     _raise_if_cancelled(cancel_check)
     _emit(progress_callback, "probing_media", "Probing media")
-    duration_ms = media_service.get_duration_ms(input_path, cancel_check=cancel_check)
-    media_fps = media_service.get_video_fps(input_path)
-
-    _raise_if_cancelled(cancel_check)
-    has_video = media_service.has_video_stream(input_path, cancel_check=cancel_check)
+    probe_info = media_service.probe_media(input_path, cancel_check=cancel_check)
+    properties = media_service.media_properties_from_probe(probe_info)
+    duration_ms = properties.media_duration_ms
+    media_fps = properties.media_fps
+    has_video = properties.has_video
 
     proxy_path = ""
     if has_video and make_proxy:
         _emit(progress_callback, "probing_media", "Checking video compatibility")
-        if media_service.needs_proxy(input_path, cancel_check=cancel_check):
+        if properties.needs_proxy:
             _raise_if_cancelled(cancel_check)
             _emit(progress_callback, "probing_media", "Generating proxy video")
             proxy_path = build_proxy_output_path(media.stem, str(work_dir_path))

@@ -242,3 +242,36 @@ def test_migration_adds_transcript_segments():
         svc.close()
     finally:
         os.unlink(db_path)
+
+
+def test_database_creates_query_indexes_idempotently(tmp_path):
+    db_path = tmp_path / "indexed.db"
+
+    svc = ProjectService(db_path)
+    svc.close()
+    svc = ProjectService(db_path)
+    try:
+        expected = {
+            "idx_projects_updated_at": ["updated_at"],
+            "idx_captions_project_idx": ["project_id", "idx"],
+            "idx_transcript_words_project_idx": ["project_id", "idx"],
+            "idx_transcript_segments_project_idx": ["project_id", "idx"],
+        }
+        indexes = {
+            row[0]
+            for row in svc._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+
+        assert expected.keys() <= indexes
+        for index_name, columns in expected.items():
+            actual_columns = [
+                row[2]
+                for row in svc._conn.execute(
+                    f"PRAGMA index_info('{index_name}')"
+                ).fetchall()
+            ]
+            assert actual_columns == columns
+    finally:
+        svc.close()

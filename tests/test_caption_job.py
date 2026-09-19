@@ -2,7 +2,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.models.caption import Caption, TranscriptWord
-from app.services.caption_job import CaptionJobRequest, export_caption_outputs, run_caption_job
+from app.services.caption_job import (
+    CaptionJobRequest,
+    export_caption_outputs,
+    prepare_caption_media,
+    run_caption_job,
+)
 from app.utils.errors import CancelledError
 
 
@@ -23,8 +28,8 @@ def test_caption_job_runs_headless_and_writes_premiere_outputs(tmp_path):
     }
     progress = []
 
-    with patch("app.services.caption_job.media_service.get_duration_ms", return_value=1000), \
-         patch("app.services.caption_job.media_service.has_video_stream", return_value=False), \
+    probe_info = {"format": {"duration": "1.0"}, "streams": []}
+    with patch("app.services.caption_job.media_service.probe_media", return_value=probe_info), \
          patch("app.services.caption_job.media_service.extract_audio_wav"), \
          patch("app.services.caption_job.transcription_service.transcribe", return_value=(segments, words)) as mock_transcribe, \
          patch("app.services.caption_job.caption_engine.generate_captions", return_value=captions) as mock_generate, \
@@ -90,8 +95,8 @@ def test_caption_job_propagates_cancellation_during_transcription(tmp_path):
         assert cancel_check is not None
         raise CancelledError("Transcription cancelled by user.")
 
-    with patch("app.services.caption_job.media_service.get_duration_ms", return_value=1000), \
-         patch("app.services.caption_job.media_service.has_video_stream", return_value=False), \
+    probe_info = {"format": {"duration": "1.0"}, "streams": []}
+    with patch("app.services.caption_job.media_service.probe_media", return_value=probe_info), \
          patch("app.services.caption_job.media_service.extract_audio_wav"), \
          patch("app.services.caption_job.transcription_service.transcribe", side_effect=cancel_from_transcribe):
         result = run_caption_job(
@@ -118,3 +123,31 @@ def test_caption_job_output_paths_are_collision_safe(tmp_path):
 
     assert Path(outputs["srt"]).name == "source_lilword_2.srt"
     assert items[0].format == "srt"
+
+
+def test_prepare_caption_media_runs_ffprobe_once(tmp_path):
+    media_path = tmp_path / "source.mov"
+    media_path.write_bytes(b"fake media")
+    probe_info = {
+        "format": {"duration": "3.25"},
+        "streams": [{
+            "codec_type": "video",
+            "codec_name": "prores",
+            "avg_frame_rate": "30000/1001",
+        }],
+    }
+
+    with patch("app.services.caption_job.media_service.probe_media", return_value=probe_info) as probe, \
+         patch("app.services.caption_job.media_service.generate_proxy") as generate_proxy, \
+         patch("app.services.caption_job.media_service.extract_audio_wav"):
+        result = prepare_caption_media(
+            str(media_path),
+            work_dir=str(tmp_path),
+        )
+
+    probe.assert_called_once_with(str(media_path), cancel_check=None)
+    generate_proxy.assert_called_once()
+    assert result.media_duration_ms == 3250
+    assert result.media_fps == 30
+    assert result.has_video is True
+    assert result.proxy_path.endswith("_proxy.mp4")

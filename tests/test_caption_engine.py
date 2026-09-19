@@ -354,3 +354,45 @@ def test_mainwindow_normalizer_uses_defaults(mock_normalize):
     finally:
         window.deleteLater()
         app.processEvents()
+
+
+@patch("app.ui.main_window.normalize_captions")
+def test_caption_edit_refreshes_only_rows_changed_by_normalization(mock_normalize):
+    """Normalization should update affected cells without rebuilding the table."""
+    app = QApplication.instance() or QApplication([])
+    settings = Settings()
+    db_mock = MagicMock(spec=ProjectService)
+    window = MainWindow(settings, db_mock)
+    captions = [
+        Caption(start_ms=0, end_ms=1000, text="First"),
+        Caption(start_ms=1050, end_ms=2000, text="Second"),
+    ]
+    window._captions = captions
+    window._caption_panel.set_captions(captions)
+    window._caption_panel._table.selectRow(0)
+    original_items = [
+        [window._caption_panel._table.item(row, col) for col in range(3)]
+        for row in range(2)
+    ]
+
+    def adjust_second_row(items, **kwargs):
+        items[1].start_ms = 1200
+        items[1].end_ms = 2200
+        return items
+
+    mock_normalize.side_effect = adjust_second_row
+    try:
+        with patch.object(window, "_schedule_caption_save"):
+            window._on_captions_edited()
+
+        assert window._caption_panel._table.item(1, 0).text() == "00:01.2"
+        assert window._caption_panel._table.item(1, 1).text() == "00:02.2"
+        assert [
+            [window._caption_panel._table.item(row, col) for col in range(3)]
+            for row in range(2)
+        ] == original_items
+        assert window._caption_panel.selected_indices() == [0]
+        assert window._caption_panel._editor.toPlainText() == "First"
+    finally:
+        window.deleteLater()
+        app.processEvents()
