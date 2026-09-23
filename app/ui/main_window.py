@@ -40,9 +40,8 @@ from app.utils.errors import CancelledError, ModelDownloadError
 
 log = logging.getLogger(__name__)
 
-# Build label – bump this on each coding round so the user/review-agent can
-# confirm the launched app is running the current source.
-_BUILD_LABEL = "r94-2026-05-06"
+# Pre-release identifier shown in the title bar and startup status message.
+_BUILD_LABEL = "0.1.0-preview"
 
 # Import watchdog timeout (seconds).  If the background import worker has not
 # completed within this time, the GUI fires an error and re-enables Import.

@@ -1,82 +1,117 @@
 # Lil Word
 
-Automatic caption generator for short voiceover clips (15–30 seconds).
+[![Tests](https://github.com/Swampd/lil_word/actions/workflows/tests.yml/badge.svg)](https://github.com/Swampd/lil_word/actions/workflows/tests.yml)
+
+Lil Word is a local-first desktop application for transcribing audio and video into editable captions and professional subtitle formats.
+
+> **Status:** Portfolio preview under active development. The core transcription, editing, project autosave, and export workflows are implemented and covered by an automated test suite.
+
+## What it does
+
+- Transcribes local media with `faster-whisper`, using CPU by default with optional GPU acceleration.
+- Generates readable caption blocks from word-level timestamps and configurable timing rules.
+- Provides synchronized video preview, playhead highlighting, inline text and timing edits, split/merge tools, and selected-caption regeneration.
+- Autosaves projects, captions, transcript words, and user presets to a local SQLite database.
+- Exports SRT, ASS, TTML/DFXP, EBU-TT, SMPTE-TT, EBU STL, MCC, and burned-in video.
+- Keeps media and project data on the user's machine; only the Whisper model download requires network access.
+
+## Technical highlights
+
+- **Desktop UI:** Python and PySide6 with responsive background workers for media import, transcription, and export.
+- **Media pipeline:** FFmpeg/ffprobe for probing, audio extraction, proxy generation, and hard-subtitle rendering.
+- **Caption engine:** Configurable reading-speed, duration, line-length, and gap rules with word-level timing refinement.
+- **Persistence:** SQLite project storage with schema migrations, ordered child-table indexes, and debounced autosave.
+- **Interchange:** Dedicated exporters and validation for consumer, web, and broadcast caption standards.
+- **Reliability:** Headless GUI, service, exporter, persistence, and acceptance coverage through pytest.
+
+## Project structure
+
+```text
+app/
+├── exporters/   Subtitle and broadcast-format writers
+├── models/      Caption, project, cue, region, and style data models
+├── services/    Transcription, media, persistence, alignment, and export logic
+├── ui/          PySide6 windows, panels, dialogs, and background workers
+├── utils/       Timecode, settings, import-session, and path helpers
+└── validation/  Format- and profile-specific validation
+tests/           Unit, GUI, packaging, and acceptance tests
+```
 
 ## Requirements
 
-- **Python 3.12** (tested with 3.12.10)
-- **ffmpeg** and **ffprobe** on PATH (tested with 8.0.1)
-- GPU optional – faster-whisper uses CPU (`int8`) by default
+- Python 3.12 (tested with 3.12.10)
+- `ffmpeg` and `ffprobe` on `PATH` (tested with 8.0.1)
+- A GPU is optional; transcription uses CPU with `int8` compute by default
 
 ## Setup
 
-```powershell
-# Create virtual environment
+```bash
 python -m venv venv
 
-# Install dependencies
-.\venv\Scripts\python.exe -m pip install --upgrade pip
-.\venv\Scripts\python.exe -m pip install -r requirements.txt
+# macOS or Linux
+source venv/bin/activate
 
-# Verify
-ffmpeg -version
-ffprobe -version
-.\venv\Scripts\python.exe -m compileall app
+# Windows PowerShell
+# .\venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m app.main
 ```
 
-## Run
-
-```powershell
-.\venv\Scripts\python.exe -m app.main
-```
-
-## First Use
-
-On first transcription, faster-whisper will download the `base` model (~150 MB) from Hugging Face and cache it locally. Subsequent runs reuse the cached model.
+On the first transcription, `faster-whisper` downloads the selected model (the default `base` model is approximately 150 MB) from Hugging Face and caches it locally.
 
 ## Workflow
 
-1. Drop a media file (or click **📂 Import**)
-2. Click **🎙 Transcribe** – audio extraction, transcription, caption generation, and timing refinement happen in background threads
-3. Optionally edit text, nudge timing, split/merge captions. **Split** and **Merge** explain their requirements in the status bar if they can't act (hover for tooltips). **Regen Sel** regenerates only a contiguous selection of captions using current timing rules — surrounding and unselected captions stay intact. Non-contiguous selections are rejected with a clear status message.
-4. Work is autosaved to a local project database — reopen previous work via **📂 Reopen** or **📂 Recent**. A persistent "💾 Projects autosave" indicator in the bottom bar confirms this behavior.
-5. Configure via toolbar:
-   - **⚙️ Rules**: Caption generation rules with **named timing presets** (4 built-in: Broadcast Standard, Relaxed Reading, Fast Pacing, Tight Voiceover — plus unlimited user presets). Load a preset to try a different feel, fine-tune the knobs, save your own. If timing actually changed and transcript data is available, the app prompts to regenerate existing captions immediately or defer to the next manual Regen.
-   - **🎨 Styles**: Design caption looks and save them as **named style presets** (3 built-in: Broadcast Standard, Cinema Subtitles, High Contrast — plus unlimited user presets) with a **live caption preview** that updates as you edit. Load, Save As, and Delete presets to iterate on caption looks. Style fields: font, size, text color, background color, alignment (all apply to TTML/EBU-TT/SMPTE-TT; text align only in EBU STL; text color only in MCC), caption placement (TTML-family). Note: These settings dictate the metadata written into the exported files. Final visual fidelity depends entirely on the downstream importer (e.g. Premiere Pro). Also configures Whisper model/device settings.
-6. Export options:
-   - **SRT**: Legacy lightweight text format
-   - **ASS**: Advanced SubStation Alpha format (optimized for libass-compatible players like VLC/mpv for literal brace fidelity; use 🎬 Video hardsubs when exact rendered output matters)
-   - **TTML/DFXP**: Richly formatted XML designed for Premiere Pro safe compatibility (preserves explicit regions and styles safely)
-   - **EBU-TT**: EBU Tech 3350 TTML profile for European broadcast distribution (explicit styles/regions, EBU metadata)
-   - **SMPTE-TT**: SMPTE ST 2052-1 TTML profile for North American broadcast and digital cinema workflows
-   - **EBU STL**: EBU Tech 3264 binary teletext subtitle format for legacy European broadcast workflows
-   - **MCC**: MacCaption Closed Caption format for North American broadcast CEA-608/708 caption interchange
-   - **🎬 Video**: Hardcode the captions onto the source media directly (video projects only)
+1. Drop a media file into the application or choose **Import**.
+2. Select **Transcribe** to extract audio, transcribe it, generate captions, and refine timing in background threads.
+3. Edit caption text and timing, or use the nudge, split, merge, and **Regen Sel** tools.
+4. Adjust caption-generation rules and named timing presets.
+5. Configure visual styles and reusable style presets.
+6. Export a subtitle file or render captions directly into the source video.
+
+Work is autosaved locally. Previous projects can be reopened from **Reopen** or **Recent** without sending their contents to an external project service.
+
+## Export formats
+
+| Format | Intended use |
+| --- | --- |
+| SRT | Lightweight, widely supported subtitles |
+| ASS | Styled subtitles for libass-compatible players |
+| TTML/DFXP | Rich XML interchange, including Premiere-oriented workflows |
+| EBU-TT | European broadcast distribution |
+| SMPTE-TT | North American broadcast and digital-cinema interchange |
+| EBU STL | Legacy European teletext workflows |
+| MCC | CEA-608/708 broadcast-caption interchange |
+| Burned video | Captions rendered directly into an MP4 |
 
 ## Tests
 
-```powershell
-# Install dev dependencies (includes pytest)
-.\venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+Install the development dependencies and run the suite:
 
-# Run tests
-.\venv\Scripts\python.exe -m pytest tests/ -v
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
 ```
 
-## Packaging (Milestone 5)
+For a display-free environment such as CI:
 
-We use PyInstaller to build a standalone Windows executable. Due to upstream packaging quirks with the `webrtcvad-wheels` package on Windows, a custom hook is provided in `build_hooks/`.
+```bash
+QT_QPA_PLATFORM=offscreen python -m pytest -q
+```
 
-Note: The packaged app requires `ffmpeg` and `ffprobe` to function. For distribution, you can simply place `ffmpeg.exe` and `ffprobe.exe` in the same directory as the packaged `lil_word.exe`, or ensure they are available on the system `PATH`.
+## Windows packaging
+
+The included PyInstaller specification builds a standalone Windows executable. A custom hook handles the upstream `webrtcvad-wheels` packaging layout.
 
 ```powershell
-# Install PyInstaller
-.\venv\Scripts\python.exe -m pip install pyinstaller
-
-# Build the executable using the provided spec file
-.\venv\Scripts\pyinstaller.exe -y lil_word.spec
-
-# Run the automated smoke verification script
-# This boots the packaged app and parses native logs to prove Qt and internal components initialized successfully
-.\venv\Scripts\python.exe scripts\verify_package.py
+python -m pip install pyinstaller
+pyinstaller -y lil_word.spec
+python scripts\verify_package.py
 ```
+
+The packaged application still requires `ffmpeg.exe` and `ffprobe.exe` beside `lil_word.exe` or on the system `PATH`.
+
+## License
+
+Lil Word is source-available for portfolio review and evaluation; it is not an open-source project. No open-source license is granted. See [LICENSE](LICENSE) for details.
