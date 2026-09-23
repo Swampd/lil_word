@@ -421,10 +421,18 @@ def test_preview_updates_on_field_change():
     settings = Settings()
     dlg = ExportSettingsDialog(settings)
 
-    # Change font family — preview should update
-    dlg._txt_font_family.setCurrentFont(QFont("Impact"))
+    # Use a font that Qt reports as installed so the test is portable across
+    # macOS, Windows, and the Linux CI runner instead of triggering fallback.
+    current_family = dlg._txt_font_family.currentFont().family()
+    target_family = next(
+        dlg._txt_font_family.itemText(index)
+        for index in range(dlg._txt_font_family.count())
+        if dlg._txt_font_family.itemText(index) != current_family
+    )
+    dlg._txt_font_family.setCurrentFont(QFont(target_family))
     dlg._txt_font_size.setText("150%")
-    assert dlg._preview._font_family == "Impact"
+    assert dlg._txt_font_family.currentFont().family() == target_family
+    assert dlg._preview._font_family == target_family
 
     # Change fill color
     dlg._txt_fill_color.setText("#00FF00")
