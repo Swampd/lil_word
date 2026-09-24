@@ -33,4 +33,5 @@ Desktop.ini
 .DS_Store
 
 admin/
+admin_gitignore/
 archive/
