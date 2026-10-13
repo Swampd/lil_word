@@ -24,6 +24,9 @@ except ImportError:
 
 # ── Silence detection ────────────────────────────────────────────────────────
 
+_WAV_READ_SECONDS = 30
+
+
 def detect_silence_regions(
     wav_path: str,
     aggressiveness: int = 2,
@@ -42,49 +45,68 @@ def detect_silence_regions(
     vad = webrtcvad.Vad(aggressiveness)
 
     try:
-        with wave.open(wav_path, "rb") as wf:
-            channels = wf.getnchannels()
-            sample_rate = wf.getframerate()
-            if channels != 1:
-                log.warning(
-                    "VAD requires mono audio, got %d channels – skipping silence detection",
-                    channels,
-                )
-                return []
-            if sample_rate not in (8000, 16000, 32000, 48000):
-                log.warning(
-                    "VAD requires 8/16/32/48 kHz, got %d Hz – skipping silence detection",
-                    sample_rate,
-                )
-                return []
-            n_frames = wf.getnframes()
-            pcm = wf.readframes(n_frames)
+        wf = wave.open(wav_path, "rb")
     except Exception as exc:
         log.warning("Could not read WAV for silence detection: %s", exc)
         return []
 
-    frame_size = int(sample_rate * frame_ms / 1000)  # samples per frame
-    frame_bytes = frame_size * 2  # 16-bit PCM
-
     silences: list[tuple[int, int]] = []
     silence_start: Optional[int] = None
-
-    offset = 0
     time_ms = 0
-    while offset + frame_bytes <= len(pcm):
-        chunk = pcm[offset:offset + frame_bytes]
-        is_speech = vad.is_speech(chunk, sample_rate)
+    pending = b""
 
-        if not is_speech:
-            if silence_start is None:
-                silence_start = time_ms
-        else:
-            if silence_start is not None:
-                silences.append((silence_start, time_ms))
-                silence_start = None
+    with wf:
+        try:
+            channels = wf.getnchannels()
+            sample_rate = wf.getframerate()
+        except Exception as exc:
+            log.warning("Could not read WAV for silence detection: %s", exc)
+            return []
 
-        offset += frame_bytes
-        time_ms += frame_ms
+        if channels != 1:
+            log.warning(
+                "VAD requires mono audio, got %d channels – skipping silence detection",
+                channels,
+            )
+            return []
+        if sample_rate not in (8000, 16000, 32000, 48000):
+            log.warning(
+                "VAD requires 8/16/32/48 kHz, got %d Hz – skipping silence detection",
+                sample_rate,
+            )
+            return []
+
+        frame_size = int(sample_rate * frame_ms / 1000)  # samples per frame
+        frame_bytes = frame_size * 2  # 16-bit PCM
+        read_size = sample_rate * _WAV_READ_SECONDS
+
+        while True:
+            try:
+                pcm = wf.readframes(read_size)
+            except Exception as exc:
+                log.warning("Could not read WAV for silence detection: %s", exc)
+                return []
+            if not pcm:
+                break
+
+            pending += pcm
+            offset = 0
+            while offset + frame_bytes <= len(pending):
+                chunk = pending[offset:offset + frame_bytes]
+                is_speech = vad.is_speech(chunk, sample_rate)
+
+                if not is_speech:
+                    if silence_start is None:
+                        silence_start = time_ms
+                else:
+                    if silence_start is not None:
+                        silences.append((silence_start, time_ms))
+                        silence_start = None
+
+                offset += frame_bytes
+                time_ms += frame_ms
+
+            pending = pending[offset:]
 
     # Close trailing silence
     if silence_start is not None:

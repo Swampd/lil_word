@@ -5,6 +5,9 @@ import tempfile
 import os
 from pathlib import Path
 
+import pytest
+
+from app.models.caption import Caption, TranscriptWord
 from app.models.project import Project
 from app.services.project_service import ProjectService
 
@@ -273,5 +276,146 @@ def test_database_creates_query_indexes_idempotently(tmp_path):
                 ).fetchall()
             ]
             assert actual_columns == columns
+    finally:
+        svc.close()
+
+
+def test_save_captions_rolls_back_a_partial_replacement(tmp_path):
+    db_path = tmp_path / "caption_rollback.db"
+    svc = ProjectService(db_path)
+    project = svc.create_project(Project(title="Caption rollback"))
+    svc.save_captions(project.id, [
+        Caption(0, 1000, "original one"),
+        Caption(1100, 2000, "original two"),
+    ])
+
+    with pytest.raises(sqlite3.IntegrityError):
+        svc.save_captions(project.id, [
+            Caption(0, 500, "partial replacement"),
+            Caption(600, 1000, None),
+        ])
+
+    assert svc._conn.in_transaction is False
+    assert [caption.text for caption in svc.load_captions(project.id)] == [
+        "original one",
+        "original two",
+    ]
+    svc.create_project(Project(title="Later unrelated save"))
+    svc.close()
+
+    reopened = ProjectService(db_path)
+    try:
+        assert [caption.text for caption in reopened.load_captions(project.id)] == [
+            "original one",
+            "original two",
+        ]
+    finally:
+        reopened.close()
+
+
+def test_save_words_rolls_back_a_partial_replacement(tmp_path):
+    db_path = tmp_path / "word_rollback.db"
+    svc = ProjectService(db_path)
+    project = svc.create_project(Project(title="Word rollback"))
+    svc.save_words(project.id, [
+        TranscriptWord(0, 200, "original", idx=0),
+        TranscriptWord(250, 500, "words", idx=1),
+    ])
+
+    with pytest.raises(sqlite3.IntegrityError):
+        svc.save_words(project.id, [
+            TranscriptWord(0, 100, "partial", idx=0),
+            TranscriptWord(150, 250, None, idx=1),
+        ])
+
+    assert svc._conn.in_transaction is False
+    assert [word.text for word in svc.load_words(project.id)] == [
+        "original",
+        "words",
+    ]
+    svc.close()
+
+
+def test_save_segments_rolls_back_a_partial_replacement(tmp_path):
+    db_path = tmp_path / "segment_rollback.db"
+    svc = ProjectService(db_path)
+    project = svc.create_project(Project(title="Segment rollback"))
+    svc.save_segments(project.id, [
+        {"start": 0.0, "end": 1.0, "text": "original one"},
+        {"start": 1.0, "end": 2.0, "text": "original two"},
+    ])
+
+    with pytest.raises(KeyError):
+        svc.save_segments(project.id, [
+            {"start": 0.0, "end": 0.5, "text": "partial replacement"},
+            {"start": 0.5, "text": "missing end"},
+        ])
+
+    assert svc._conn.in_transaction is False
+    assert svc.load_segments(project.id) == [
+        {"start": 0.0, "end": 1.0, "text": "original one"},
+        {"start": 1.0, "end": 2.0, "text": "original two"},
+    ]
+    svc.close()
+
+
+def test_bulk_save_rolls_back_when_commit_fails(tmp_path):
+    db_path = tmp_path / "commit_rollback.db"
+    svc = ProjectService(db_path)
+    svc._conn.execute("PRAGMA foreign_keys=ON")
+    svc._conn.execute("PRAGMA defer_foreign_keys=ON")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        svc.save_captions(999_999, [Caption(0, 1000, "orphan")])
+
+    assert svc._conn.in_transaction is False
+    count = svc._conn.execute(
+        "SELECT COUNT(*) FROM captions WHERE project_id=999999"
+    ).fetchone()[0]
+    assert count == 0
+    svc.close()
+
+
+def test_migration_adds_media_fps_with_zero_default(tmp_path):
+    db_path = tmp_path / "pre_fps.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            media_path TEXT NOT NULL DEFAULT '',
+            audio_path TEXT NOT NULL DEFAULT '',
+            proxy_path TEXT NOT NULL DEFAULT '',
+            media_duration_ms INTEGER NOT NULL DEFAULT 0,
+            has_video INTEGER NOT NULL DEFAULT 0,
+            title TEXT NOT NULL DEFAULT 'Untitled'
+        )
+    """)
+    conn.execute(
+        "INSERT INTO projects (created_at, updated_at, title) VALUES (1.0, 1.0, ?)",
+        ("Legacy FPS",),
+    )
+    conn.commit()
+    conn.close()
+
+    svc = ProjectService(db_path)
+    try:
+        project = svc.get_latest_project()
+        assert project is not None
+        assert project.media_fps == 0
+    finally:
+        svc.close()
+
+
+def test_project_media_fps_round_trips_through_create_and_update(tmp_path):
+    svc = ProjectService(tmp_path / "fps_round_trip.db")
+    try:
+        project = svc.create_project(Project(title="FPS", media_fps=24))
+        assert svc.load_project(project.id).media_fps == 24
+
+        project.media_fps = 30
+        svc.update_project(project)
+        assert svc.load_project(project.id).media_fps == 30
     finally:
         svc.close()

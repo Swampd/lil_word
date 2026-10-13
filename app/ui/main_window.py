@@ -202,6 +202,7 @@ class MainWindow(QMainWindow):
         self._media_duration_ms: int = 0
         self._media_fps: int | None = None
         self._import_guard = ImportSessionGuard()
+        self._persistence_error_active = False
 
         self.setWindowTitle(f"Lil Word  [{_BUILD_LABEL}]")
         self.setMinimumSize(960, 600)
@@ -439,7 +440,8 @@ class MainWindow(QMainWindow):
 
     def _open_project_by_id(self, project_id: int):
         """Open a specific project by its database ID."""
-        self._flush_caption_save()
+        if not self._flush_caption_save():
+            return
         project = self._project_svc.load_project(project_id)
         if not project:
             QMessageBox.warning(self, "Not Found", "The selected project was not found.")
@@ -465,8 +467,7 @@ class MainWindow(QMainWindow):
         # Restore project state
         self._project = project
         self._media_duration_ms = project.media_duration_ms
-        self._media_fps = None
-        self._media_fps = self._resolve_media_fps()
+        self._media_fps = project.media_fps if project.media_fps > 0 else None
         self._captions = self._project_svc.load_captions(project.id)
         self._words = self._project_svc.load_words(project.id)
         self._segments = self._project_svc.load_segments(project.id)
@@ -495,7 +496,8 @@ class MainWindow(QMainWindow):
         )
 
     def _load_media(self, path: str):
-        self._flush_caption_save()
+        if not self._flush_caption_save():
+            return
         # Guard against reentrant imports
         token = self._import_guard.start_import(path)
         if token is None:
@@ -588,6 +590,7 @@ class MainWindow(QMainWindow):
         self._project.audio_path = audio_path
         self._project.proxy_path = proxy_path
         self._project.media_duration_ms = duration_ms
+        self._project.media_fps = media_fps if media_fps > 0 else 0
         self._project.has_video = has_video
         self._media_duration_ms = duration_ms
         self._media_fps = media_fps if media_fps > 0 else None
@@ -739,11 +742,19 @@ class MainWindow(QMainWindow):
         self._caption_panel.set_captions(self._captions)
         self._video_panel.set_captions(self._captions)
 
-        # Persist
+        # Persist. Keep the completed in-memory results available if storage
+        # fails so the user can retry without retranscribing.
+        persistence_succeeded = True
         if self._project and self._project.id:
-            self._project_svc.save_captions(self._project.id, self._captions)
-            self._project_svc.save_words(self._project.id, self._words)
-            self._project_svc.save_segments(self._project.id, self._segments)
+            try:
+                self._project_svc.save_captions(self._project.id, self._captions)
+                self._project_svc.save_words(self._project.id, self._words)
+                self._project_svc.save_segments(self._project.id, self._segments)
+            except Exception as exc:
+                persistence_succeeded = False
+                self._report_persistence_error("transcription results", exc)
+            else:
+                self._persistence_error_active = False
 
         self._btn_transcribe.setEnabled(True)
         self._btn_reflow.setEnabled(True)
@@ -752,7 +763,12 @@ class MainWindow(QMainWindow):
 
         self._progress.setVisible(False)
         self._btn_cancel_job.setVisible(False)
-        self._set_status(f"Done – {len(captions)} captions generated (autosaved)")
+        if persistence_succeeded:
+            self._set_status(f"Done – {len(captions)} captions generated (autosaved)")
+        else:
+            self._set_status(
+                f"Done – {len(captions)} captions generated; autosave failed"
+            )
 
     def _on_transcribe_error(self, msg):
         self._progress.setVisible(False)
@@ -785,8 +801,8 @@ class MainWindow(QMainWindow):
         self._captions = new_captions
         self._caption_panel.set_captions(self._captions)
         self._video_panel.set_captions(self._captions)
-        self._save_captions()
-        self._set_status(f"Reflowed – {len(self._captions)} captions")
+        if self._save_captions():
+            self._set_status(f"Reflowed – {len(self._captions)} captions")
 
     def _reflow_captions_direct(self):
         """Re-run caption generation without overwrite warning.
@@ -801,8 +817,8 @@ class MainWindow(QMainWindow):
         self._captions = new_captions
         self._caption_panel.set_captions(self._captions)
         self._video_panel.set_captions(self._captions)
-        self._save_captions()
-        self._set_status(f"Reflowed – {len(self._captions)} captions")
+        if self._save_captions():
+            self._set_status(f"Reflowed – {len(self._captions)} captions")
 
     def _reflow_selected(self):
         """Regenerate only the selected contiguous captions using current rules.
@@ -859,11 +875,11 @@ class MainWindow(QMainWindow):
         self._captions[sel[0]:sel[-1] + 1] = new_captions
         self._caption_panel.set_captions(self._captions)
         self._video_panel.set_captions(self._captions)
-        self._save_captions()
-        self._set_status(
-            f"Reflowed {len(sel)} → {len(new_captions)} captions "
-            f"({range_start}–{range_end} ms)"
-        )
+        if self._save_captions():
+            self._set_status(
+                f"Reflowed {len(sel)} → {len(new_captions)} captions "
+                f"({range_start}–{range_end} ms)"
+            )
 
     def _run_reflow_core(self, words: list, segments: list[dict] | None = None) -> list:
         """Shared reflow engine: generate + refine captions from words (with segment fallback).
@@ -1264,7 +1280,7 @@ class MainWindow(QMainWindow):
         timer = getattr(self, "_caption_save_timer", None)
         if timer is not None:
             timer.stop()
-        self._save_captions()
+        return self._save_captions()
 
     def _on_split_feedback(self, reason: str):
         """Show a visible status message when Split cannot act."""
@@ -1303,9 +1319,35 @@ class MainWindow(QMainWindow):
             media_duration_ms=self._media_duration_ms,
         )
 
-    def _save_captions(self):
-        if self._project and self._project.id:
+    def _save_captions(self) -> bool:
+        if not self._project or not self._project.id:
+            return True
+
+        try:
             self._project_svc.save_captions(self._project.id, self._captions)
+        except Exception as exc:
+            self._report_persistence_error("caption changes", exc)
+            return False
+
+        self._persistence_error_active = False
+        return True
+
+    def _report_persistence_error(self, subject: str, exc: Exception) -> None:
+        """Make persistence failures visible without repeatedly opening dialogs."""
+        log.error("Unable to save %s: %s", subject, exc, exc_info=True)
+        self._set_status(f"Autosave failed – {subject} were not saved")
+        if self._persistence_error_active:
+            return
+
+        self._persistence_error_active = True
+        QMessageBox.critical(
+            self,
+            "Autosave Failed",
+            f"Lil Word could not save the current {subject}.\n\n"
+            f"Your changes are still open in the app. Free some disk space or "
+            f"restore access to the project database, then edit again to retry.\n\n"
+            f"Details: {exc}",
+        )
 
     def _refresh_reopen_button(self):
         """Update the Reopen Last button and Recent Projects menu from the DB."""
@@ -1340,24 +1382,15 @@ class MainWindow(QMainWindow):
         return build_export_name(media_path, suffix)
 
     def _resolve_media_fps(self) -> int | None:
-        """Return cached FPS from current media if available, else probe media once."""
+        """Return FPS captured during import, if available."""
         if self._media_fps and self._media_fps > 0:
             return self._media_fps
-
-        if not self._project or not self._project.media_path:
-            return None
-
-        try:
-            fps = media_service.get_video_fps(self._project.media_path)
-        except Exception as exc:
-            log.warning("Unable to probe media FPS from %s: %s", self._project.media_path, exc)
-            return None
-
-        self._media_fps = fps
-        return fps
+        return None
 
     def closeEvent(self, event):
-        self._flush_caption_save()
+        if not self._flush_caption_save():
+            event.ignore()
+            return
         self._shutdown_all_workers()
         self._project_svc.close()
         super().closeEvent(event)

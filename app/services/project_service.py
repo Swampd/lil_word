@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import sqlite3
 import time
 from pathlib import Path
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS projects (
     audio_path TEXT NOT NULL DEFAULT '',
     proxy_path TEXT NOT NULL DEFAULT '',
     media_duration_ms INTEGER NOT NULL DEFAULT 0,
+    media_fps INTEGER NOT NULL DEFAULT 0,
     has_video INTEGER NOT NULL DEFAULT 0,
     title TEXT NOT NULL DEFAULT 'Untitled'
 );
@@ -80,6 +82,17 @@ class ProjectService:
         """Create query indexes after all schema migrations are complete."""
         self._conn.executescript(_INDEXES)
 
+    @contextmanager
+    def _transaction(self):
+        """Commit a unit of work atomically, rolling back every failure."""
+        self._conn.execute("BEGIN")
+        try:
+            yield
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+
     def _migrate(self):
         """Apply schema migrations for columns/tables added after initial release."""
         cols = {
@@ -89,6 +102,10 @@ class ProjectService:
         if "media_duration_ms" not in cols:
             self._conn.execute(
                 "ALTER TABLE projects ADD COLUMN media_duration_ms INTEGER NOT NULL DEFAULT 0"
+            )
+        if "media_fps" not in cols:
+            self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN media_fps INTEGER NOT NULL DEFAULT 0"
             )
         if "has_video" not in cols:
             self._conn.execute(
@@ -121,10 +138,11 @@ class ProjectService:
         now = time.time()
         cur = self._conn.execute(
             "INSERT INTO projects (created_at, updated_at, media_path, audio_path, proxy_path,"
-            " media_duration_ms, has_video, title)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " media_duration_ms, media_fps, has_video, title)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (now, now, project.media_path, project.audio_path, project.proxy_path,
-             project.media_duration_ms, int(project.has_video), project.title),
+             project.media_duration_ms, project.media_fps,
+             int(project.has_video), project.title),
         )
         project.id = cur.lastrowid
         project.created_at = now
@@ -136,24 +154,26 @@ class ProjectService:
         project.updated_at = time.time()
         self._conn.execute(
             "UPDATE projects SET updated_at=?, media_path=?, audio_path=?, proxy_path=?,"
-            " media_duration_ms=?, has_video=?, title=? WHERE id=?",
+            " media_duration_ms=?, media_fps=?, has_video=?, title=? WHERE id=?",
             (project.updated_at, project.media_path, project.audio_path,
-             project.proxy_path, project.media_duration_ms, int(project.has_video),
-             project.title, project.id),
+             project.proxy_path, project.media_duration_ms, project.media_fps,
+             int(project.has_video), project.title, project.id),
         )
         self._conn.commit()
 
     def load_project(self, project_id: int) -> Optional[Project]:
         row = self._conn.execute(
             "SELECT id, created_at, updated_at, media_path, audio_path, proxy_path,"
-            " media_duration_ms, has_video, title FROM projects WHERE id=?", (project_id,),
+            " media_duration_ms, media_fps, has_video, title"
+            " FROM projects WHERE id=?", (project_id,),
         ).fetchone()
         if not row:
             return None
         return Project(
             id=row[0], created_at=row[1], updated_at=row[2],
             media_path=row[3], audio_path=row[4], proxy_path=row[5],
-            media_duration_ms=row[6], has_video=bool(row[7]), title=row[8],
+            media_duration_ms=row[6], media_fps=row[7],
+            has_video=bool(row[8]), title=row[9],
         )
 
     def get_latest_project(self) -> Optional[Project]:
@@ -168,14 +188,16 @@ class ProjectService:
         """Return the most recently updated projects, newest first."""
         rows = self._conn.execute(
             "SELECT id, created_at, updated_at, media_path, audio_path, proxy_path,"
-            " media_duration_ms, has_video, title FROM projects ORDER BY updated_at DESC LIMIT ?",
+            " media_duration_ms, media_fps, has_video, title"
+            " FROM projects ORDER BY updated_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [
             Project(
                 id=r[0], created_at=r[1], updated_at=r[2],
                 media_path=r[3], audio_path=r[4], proxy_path=r[5],
-                media_duration_ms=r[6], has_video=bool(r[7]), title=r[8],
+                media_duration_ms=r[6], media_fps=r[7],
+                has_video=bool(r[8]), title=r[9],
             )
             for r in rows
         ]
@@ -183,18 +205,20 @@ class ProjectService:
     # ── Captions ─────────────────────────────────────────────────────────
 
     def save_captions(self, project_id: int, captions: list[Caption]):
-        self._conn.execute("DELETE FROM captions WHERE project_id=?", (project_id,))
-        for i, cap in enumerate(captions):
+        with self._transaction():
             self._conn.execute(
-                "INSERT INTO captions (project_id, idx, start_ms, end_ms, text)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (project_id, i, cap.start_ms, cap.end_ms, cap.text),
+                "DELETE FROM captions WHERE project_id=?", (project_id,)
             )
-        self._conn.execute(
-            "UPDATE projects SET updated_at=? WHERE id=?",
-            (time.time(), project_id),
-        )
-        self._conn.commit()
+            for i, cap in enumerate(captions):
+                self._conn.execute(
+                    "INSERT INTO captions (project_id, idx, start_ms, end_ms, text)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (project_id, i, cap.start_ms, cap.end_ms, cap.text),
+                )
+            self._conn.execute(
+                "UPDATE projects SET updated_at=? WHERE id=?",
+                (time.time(), project_id),
+            )
 
     def load_captions(self, project_id: int) -> list[Caption]:
         rows = self._conn.execute(
@@ -206,18 +230,21 @@ class ProjectService:
     # ── Transcript words ─────────────────────────────────────────────────
 
     def save_words(self, project_id: int, words: list[TranscriptWord]):
-        self._conn.execute("DELETE FROM transcript_words WHERE project_id=?", (project_id,))
-        for w in words:
+        with self._transaction():
             self._conn.execute(
-                "INSERT INTO transcript_words (project_id, idx, start_ms, end_ms, text, confidence)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (project_id, w.idx, w.start_ms, w.end_ms, w.text, w.confidence),
+                "DELETE FROM transcript_words WHERE project_id=?", (project_id,)
             )
-        self._conn.execute(
-            "UPDATE projects SET updated_at=? WHERE id=?",
-            (time.time(), project_id),
-        )
-        self._conn.commit()
+            for w in words:
+                self._conn.execute(
+                    "INSERT INTO transcript_words"
+                    " (project_id, idx, start_ms, end_ms, text, confidence)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (project_id, w.idx, w.start_ms, w.end_ms, w.text, w.confidence),
+                )
+            self._conn.execute(
+                "UPDATE projects SET updated_at=? WHERE id=?",
+                (time.time(), project_id),
+            )
 
     def load_words(self, project_id: int) -> list[TranscriptWord]:
         rows = self._conn.execute(
@@ -234,21 +261,21 @@ class ProjectService:
 
     def save_segments(self, project_id: int, segments: list[dict]):
         """Persist raw transcript segments (start/end in seconds, text)."""
-        self._conn.execute(
-            "DELETE FROM transcript_segments WHERE project_id=?", (project_id,)
-        )
-        for i, seg in enumerate(segments):
+        with self._transaction():
             self._conn.execute(
-                "INSERT INTO transcript_segments"
-                " (project_id, idx, start_s, end_s, text)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (project_id, i, seg["start"], seg["end"], seg.get("text", "")),
+                "DELETE FROM transcript_segments WHERE project_id=?", (project_id,)
             )
-        self._conn.execute(
-            "UPDATE projects SET updated_at=? WHERE id=?",
-            (time.time(), project_id),
-        )
-        self._conn.commit()
+            for i, seg in enumerate(segments):
+                self._conn.execute(
+                    "INSERT INTO transcript_segments"
+                    " (project_id, idx, start_s, end_s, text)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (project_id, i, seg["start"], seg["end"], seg.get("text", "")),
+                )
+            self._conn.execute(
+                "UPDATE projects SET updated_at=? WHERE id=?",
+                (time.time(), project_id),
+            )
 
     def load_segments(self, project_id: int) -> list[dict]:
         """Load raw transcript segments. Returns empty list for older projects."""

@@ -1,13 +1,16 @@
 import sys
+import sqlite3
 import pytest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QCoreApplication, QElapsedTimer, QEvent, QObject, Qt, Signal
 
 from app.ui import main_window
 from app.ui.main_window import MainWindow
+from app.models.caption import Caption
+from app.models.project import Project
 from app.utils.settings import Settings
 from app.services.project_service import ProjectService
 from tests.test_acceptance import _ensure_test_dir, _generate_synthetic_mp4, _generate_synthetic_mp3, skip_no_ffmpeg
@@ -17,6 +20,121 @@ def _ensure_app():
     if not app:
         app = QApplication(sys.argv)
     return app
+
+
+def test_caption_autosave_failure_is_visible_without_repeated_dialogs(tmp_path):
+    _ensure_app()
+    project_svc = ProjectService(tmp_path / "autosave_failure.db")
+    project = project_svc.create_project(Project(title="Autosave failure"))
+    window = MainWindow(Settings(), project_svc)
+    window._project = project
+    window._captions = [Caption(0, 1000, "Unsaved caption")]
+
+    failures = [
+        sqlite3.OperationalError("disk full"),
+        sqlite3.OperationalError("disk full"),
+        None,
+        sqlite3.OperationalError("disk full again"),
+    ]
+    try:
+        with patch.object(project_svc, "save_captions", side_effect=failures), \
+             patch("app.ui.main_window.QMessageBox.critical") as critical:
+            assert window._save_captions() is False
+            assert window._save_captions() is False
+            assert critical.call_count == 1
+            assert "autosave failed" in window._status_label.text().lower()
+
+            assert window._save_captions() is True
+            assert window._save_captions() is False
+            assert critical.call_count == 2
+    finally:
+        window.deleteLater()
+        project_svc.close()
+
+
+def test_transcription_results_remain_available_when_persistence_fails(tmp_path):
+    _ensure_app()
+    project_svc = ProjectService(tmp_path / "transcription_save_failure.db")
+    project = project_svc.create_project(Project(title="Transcription failure"))
+    window = MainWindow(Settings(), project_svc)
+    window._project = project
+    captions = [Caption(0, 1000, "Generated caption")]
+
+    try:
+        with patch.object(
+            project_svc,
+            "save_captions",
+            side_effect=sqlite3.OperationalError("database is read-only"),
+        ), patch("app.ui.main_window.QMessageBox.critical") as critical:
+            window._on_transcribe_done([], [], captions)
+
+        assert window._captions == captions
+        assert window._caption_panel.get_captions() == captions
+        assert window._btn_transcribe.isEnabled()
+        assert "autosave failed" in window._status_label.text().lower()
+        critical.assert_called_once()
+    finally:
+        window.deleteLater()
+        project_svc.close()
+
+
+def test_failed_caption_flush_blocks_project_switch(tmp_path):
+    _ensure_app()
+    project_svc = ProjectService(tmp_path / "blocked_switch.db")
+    current = project_svc.create_project(Project(title="Current"))
+    destination = project_svc.create_project(Project(title="Destination"))
+    window = MainWindow(Settings(), project_svc)
+    window._project = current
+
+    try:
+        with patch.object(window, "_flush_caption_save", return_value=False), \
+             patch.object(project_svc, "load_project", wraps=project_svc.load_project) as load:
+            window._open_project_by_id(destination.id)
+
+        load.assert_not_called()
+        assert window._project.id == current.id
+    finally:
+        window.deleteLater()
+        project_svc.close()
+
+
+def test_failed_caption_flush_blocks_new_import(tmp_path):
+    _ensure_app()
+    project_svc = ProjectService(tmp_path / "blocked_import.db")
+    current = project_svc.create_project(Project(title="Current"))
+    window = MainWindow(Settings(), project_svc)
+    window._project = current
+
+    try:
+        with patch.object(window, "_flush_caption_save", return_value=False), \
+             patch.object(window._import_guard, "start_import", return_value=None) as start:
+            window._load_media("replacement.mp4")
+
+        start.assert_not_called()
+        assert window._project.id == current.id
+    finally:
+        window.deleteLater()
+        project_svc.close()
+
+
+def test_failed_caption_flush_blocks_window_close(tmp_path):
+    _ensure_app()
+    project_svc = ProjectService(tmp_path / "blocked_close.db")
+    window = MainWindow(Settings(), project_svc)
+    event = Mock()
+
+    try:
+        with patch.object(window, "_flush_caption_save", return_value=False), \
+             patch.object(window, "_shutdown_all_workers") as shutdown, \
+             patch.object(project_svc, "close") as close:
+            window.closeEvent(event)
+
+        event.ignore.assert_called_once()
+        shutdown.assert_not_called()
+        close.assert_not_called()
+    finally:
+        window.deleteLater()
+        project_svc.close()
 
 
 def test_terminal_worker_signals_schedule_worker_deletion():
@@ -390,6 +508,57 @@ def test_reopen_restores_captions_from_db():
         project_svc.close()
         db_path.unlink(missing_ok=True)
         dummy_media.unlink(missing_ok=True)
+
+
+def test_reopen_uses_persisted_fps_without_probing_media(tmp_path):
+    _ensure_app()
+    media_path = tmp_path / "persisted_fps.mp4"
+    media_path.write_bytes(b"fake media")
+    project_svc = ProjectService(tmp_path / "persisted_fps.db")
+    project = project_svc.create_project(Project(
+        title="Persisted FPS",
+        media_path=str(media_path),
+        media_fps=24,
+    ))
+    window = MainWindow(Settings(), project_svc)
+
+    try:
+        with patch.object(window._video_panel, "load_media"), \
+             patch("app.ui.main_window.media_service.get_video_fps") as probe:
+            window._open_project_by_id(project.id)
+
+        assert window._media_fps == 24
+        probe.assert_not_called()
+    finally:
+        window.deleteLater()
+        project_svc.close()
+
+
+def test_import_completion_persists_probed_fps(tmp_path):
+    _ensure_app()
+    media_path = tmp_path / "imported_fps.mp4"
+    media_path.write_bytes(b"fake media")
+    project_svc = ProjectService(tmp_path / "imported_fps.db")
+    window = MainWindow(Settings(), project_svc)
+    window._project = Project(title="Imported FPS", media_path=str(media_path))
+    token = window._import_guard.start_import(str(media_path))
+
+    try:
+        with patch.object(window._video_panel, "load_media"):
+            window._on_import_done(
+                "audio.wav",
+                1_000,
+                True,
+                "",
+                30,
+                token,
+            )
+
+        reloaded = project_svc.load_project(window._project.id)
+        assert reloaded.media_fps == 30
+    finally:
+        window.deleteLater()
+        project_svc.close()
 
 
 def test_list_recent_projects():

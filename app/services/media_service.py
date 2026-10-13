@@ -134,9 +134,14 @@ def media_properties_from_probe(info: dict) -> MediaProperties:
     )
 
 
-def get_video_fps(path: str) -> int | None:
+def get_video_fps(
+    path: str,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> int | None:
     """Return integer FPS for the first video stream, or None when unavailable."""
-    return media_properties_from_probe(probe_media(path)).media_fps
+    return media_properties_from_probe(
+        probe_media(path, cancel_check=cancel_check)
+    ).media_fps
 
 
 def _run(

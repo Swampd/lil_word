@@ -65,3 +65,24 @@ def test_media_properties_keep_h264_and_audio_only_proxy_rules():
     assert audio_only.media_fps is None
     assert audio_only.has_video is False
     assert audio_only.needs_proxy is False
+
+
+def test_get_video_fps_passes_cancellation_to_probe():
+    cancel_check = lambda: False
+    probe_info = {
+        "format": {"duration": "1.0"},
+        "streams": [{
+            "codec_type": "video",
+            "codec_name": "h264",
+            "avg_frame_rate": "30000/1001",
+        }],
+    }
+
+    with patch.object(media_service, "probe_media", return_value=probe_info) as probe:
+        fps = media_service.get_video_fps(
+            "source.mp4",
+            cancel_check=cancel_check,
+        )
+
+    assert fps == 30
+    probe.assert_called_once_with("source.mp4", cancel_check=cancel_check)

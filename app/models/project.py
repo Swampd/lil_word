@@ -14,6 +14,7 @@ class Project:
     audio_path: str = ""
     proxy_path: str = ""
     media_duration_ms: int = 0
+    media_fps: int = 0
     has_video: bool = False
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
