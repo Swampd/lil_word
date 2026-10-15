@@ -1,5 +1,6 @@
 """Application settings and defaults."""
 
+from copy import deepcopy
 import json
 import logging
 import os
@@ -98,6 +99,10 @@ class Settings:
 
     def get(self, key: str, default=None):
         return self._data.get(key, default)
+
+    def to_dict(self) -> dict:
+        """Return an isolated copy of the complete settings state."""
+        return deepcopy(self._data)
 
     def set(self, key: str, value):
         self._data[key] = value
