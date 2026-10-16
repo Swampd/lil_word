@@ -31,6 +31,7 @@ from app.ui.export_settings_dialog import ExportSettingsDialog
 from app.services.alignment_service import refine_timing
 from app.services.export_service import export_srt, export_ass
 from app.services.project_service import ProjectService
+from app.services.history_service import ApplicationHistory
 from app.ui.video_panel import VideoPanel
 from app.ui.caption_panel import CaptionPanel
 from app.utils.settings import Settings
@@ -203,6 +204,7 @@ class MainWindow(QMainWindow):
         self._media_fps: int | None = None
         self._import_guard = ImportSessionGuard()
         self._persistence_error_active = False
+        self._history = ApplicationHistory(self)
 
         self.setWindowTitle(f"Lil Word  [{_BUILD_LABEL}]")
         self.setMinimumSize(960, 600)
