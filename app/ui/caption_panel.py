@@ -6,7 +6,7 @@ from bisect import bisect_right
 import re
 from typing import Iterable, Optional
 
-from PySide6.QtCore import Qt, Signal, Slot, QModelIndex
+from PySide6.QtCore import Qt, Signal, Slot, QModelIndex, QItemSelectionModel
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QAbstractItemView, QHeaderView, QMenu, QMessageBox,
@@ -182,6 +182,25 @@ class CaptionPanel(QWidget):
         for idx in self._table.selectedIndexes():
             rows.add(idx.row())
         return sorted(rows)
+
+    def select_caption_ids(self, caption_ids: Iterable[str]) -> None:
+        """Restore row selection by stable caption identity."""
+        selected_ids = set(caption_ids)
+        selection_model = self._table.selectionModel()
+        self._updating = True
+        try:
+            self._table.clearSelection()
+            for row, caption in enumerate(self._captions):
+                if caption.id not in selected_ids:
+                    continue
+                index = self._table.model().index(row, 0)
+                selection_model.select(
+                    index,
+                    QItemSelectionModel.Select | QItemSelectionModel.Rows,
+                )
+        finally:
+            self._updating = False
+        self._on_selection_changed()
 
     # ── Table refresh ────────────────────────────────────────────────────
 

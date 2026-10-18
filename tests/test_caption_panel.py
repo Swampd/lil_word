@@ -151,3 +151,26 @@ def test_refresh_caption_rows_preserves_unaffected_items_and_selection():
     assert panel._editor.toPlainText() == "Selected"
     resize_all.assert_not_called()
     resize_row.assert_called_once_with(0)
+
+
+def test_select_caption_ids_restores_selection_and_editor_by_stable_identity():
+    app = QApplication.instance() or QApplication([])
+    panel = CaptionPanel()
+    captions = [
+        Caption(start_ms=0, end_ms=1000, text="First", id="caption-a"),
+        Caption(start_ms=1100, end_ms=2000, text="Second", id="caption-b"),
+        Caption(start_ms=2100, end_ms=3000, text="Third", id="caption-c"),
+    ]
+    panel.set_captions(captions)
+
+    panel.select_caption_ids(("caption-c",))
+
+    assert panel.selected_indices() == [2]
+    assert panel._editor.isEnabled()
+    assert panel._editor.toPlainText() == "Third"
+
+    panel.select_caption_ids(("caption-a", "caption-c"))
+
+    assert panel.selected_indices() == [0, 2]
+    assert not panel._editor.isEnabled()
+    assert panel._editor.toPlainText() == ""

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 
 from app.models.caption import Caption, TranscriptWord
+from app.models.history import CaptionHistorySnapshot, SettingsSnapshot
 from app.models.project import Project
 from app.services import media_service
 from app.services.caption_engine import normalize_captions
@@ -31,7 +32,13 @@ from app.ui.export_settings_dialog import ExportSettingsDialog
 from app.services.alignment_service import refine_timing
 from app.services.export_service import export_srt, export_ass
 from app.services.project_service import ProjectService
-from app.services.history_service import ApplicationHistory
+from app.services.history_service import (
+    ApplicationHistory,
+    CaptionRangeState,
+    CaptionTextState,
+    CaptionTimingState,
+    PresetState,
+)
 from app.ui.video_panel import VideoPanel
 from app.ui.caption_panel import CaptionPanel
 from app.utils.settings import Settings
@@ -1247,7 +1254,13 @@ class MainWindow(QMainWindow):
 
     def _on_captions_edited(self):
         """Called when captions change in the editor – normalize and persist."""
-        self._captions = self._caption_panel.get_captions()
+        edited_captions = self._caption_panel.get_captions()
+        selected_ids = tuple(
+            edited_captions[row].id
+            for row in self._caption_panel.selected_indices()
+            if 0 <= row < len(edited_captions)
+        )
+        self._captions = edited_captions
         before = [
             (caption.start_ms, caption.end_ms, caption.text)
             for caption in self._captions
@@ -1257,17 +1270,149 @@ class MainWindow(QMainWindow):
             (caption.start_ms, caption.end_ms, caption.text)
             for caption in self._captions
         ]
-        if len(before) != len(after):
+        structural = len(before) != len(after)
+        changed_rows = [] if structural else [
+            row
+            for row, (old, new) in enumerate(zip(before, after))
+            if old != new
+        ]
+        self._apply_caption_state(
+            changed_rows=changed_rows,
+            structural=structural,
+            selected_caption_ids=selected_ids,
+            status="Caption changes updated (autosave pending)",
+        )
+
+    # ── Undo/redo state application ────────────────────────────────────
+
+    def apply_caption_text(self, state: CaptionTextState) -> None:
+        """Apply one caption's text through the shared synchronization path."""
+        row = self._caption_row_for_id(state.caption_id)
+        self._captions[row].text = state.text
+        self._apply_caption_state(
+            changed_rows=[row],
+            structural=False,
+            selected_caption_ids=state.selected_caption_ids,
+            status="Caption text updated (autosave pending)",
+        )
+
+    def apply_caption_timing(self, state: CaptionTimingState) -> None:
+        """Apply exact caption timing without running automatic normalization."""
+        changed_rows: list[int] = []
+        seen_caption_ids: set[str] = set()
+        for timing in state.captions:
+            if timing.caption_id in seen_caption_ids:
+                raise ValueError(
+                    f"duplicate caption timing state: {timing.caption_id}"
+                )
+            seen_caption_ids.add(timing.caption_id)
+            changed_rows.append(self._caption_row_for_id(timing.caption_id))
+
+        for row, timing in zip(changed_rows, state.captions):
+            caption = self._captions[row]
+            caption.start_ms = timing.start_ms
+            caption.end_ms = timing.end_ms
+        self._apply_caption_state(
+            changed_rows=changed_rows,
+            structural=False,
+            selected_caption_ids=state.selected_caption_ids,
+            status="Caption timing updated (autosave pending)",
+        )
+
+    def apply_caption_range(self, state: CaptionRangeState) -> None:
+        """Apply one structural caption splice and restore selection by ID."""
+        end_index = state.start_index + state.remove_count
+        if (
+            state.start_index < 0
+            or state.remove_count < 0
+            or end_index > len(self._captions)
+        ):
+            raise IndexError("caption range is outside the current caption list")
+        self._captions[state.start_index:end_index] = [
+            caption.restore() for caption in state.captions
+        ]
+        self._apply_caption_state(
+            structural=True,
+            selected_caption_ids=state.selected_caption_ids,
+            status="Caption range updated (autosave pending)",
+        )
+
+    def apply_all_captions(self, state: CaptionHistorySnapshot) -> None:
+        """Replace the complete caption collection from an immutable snapshot."""
+        self._captions = state.restore_captions()
+        self._apply_caption_state(
+            structural=True,
+            selected_caption_ids=state.selected_caption_ids,
+            status="Captions updated (autosave pending)",
+        )
+
+    def apply_settings(self, state: SettingsSnapshot) -> None:
+        """Replace settings, persist them, and refresh live style consumers."""
+        persistence_succeeded = True
+        try:
+            self._settings.replace_all(state.restore())
+        except Exception as exc:
+            persistence_succeeded = False
+            self._report_persistence_error("settings", exc)
+        self._video_panel.set_style_settings(self._settings)
+        if persistence_succeeded:
+            self._persistence_error_active = False
+            self._set_status("Settings updated")
+
+    def apply_preset(self, state: PresetState) -> None:
+        """Create, replace, or delete one persisted user preset."""
+        preset_keys = {
+            "timing": "timing_presets",
+            "style": "style_presets",
+        }
+        try:
+            settings_key = preset_keys[state.preset_kind]
+        except KeyError as exc:
+            raise ValueError(f"unknown preset kind: {state.preset_kind}") from exc
+
+        updated_settings = self._settings.to_dict()
+        presets = dict(updated_settings.get(settings_key, {}))
+        if state.values is None:
+            presets.pop(state.name, None)
+        else:
+            presets[state.name] = state.values.restore()
+        updated_settings[settings_key] = presets
+
+        try:
+            self._settings.replace_all(updated_settings)
+        except Exception as exc:
+            self._report_persistence_error(f"{state.preset_kind} presets", exc)
+            return
+
+        self._persistence_error_active = False
+        self._set_status(f"{state.preset_kind.title()} preset updated")
+
+    def _caption_row_for_id(self, caption_id: str) -> int:
+        for row, caption in enumerate(self._captions):
+            if caption.id == caption_id:
+                return row
+        raise ValueError(f"caption not found: {caption_id}")
+
+    def _apply_caption_state(
+        self,
+        *,
+        changed_rows=(),
+        structural: bool,
+        selected_caption_ids=(),
+        status: str,
+    ) -> None:
+        """Synchronize one caption state across UI, autosave, and status."""
+        if structural:
             self._caption_panel.set_captions(self._captions)
         else:
-            changed_rows = [
-                row
-                for row, (old, new) in enumerate(zip(before, after))
-                if old != new
-            ]
-            self._caption_panel.refresh_caption_rows(self._captions, changed_rows)
+            self._caption_panel.refresh_caption_rows(
+                self._captions,
+                changed_rows,
+            )
         self._video_panel.set_captions(self._captions)
+        self._caption_panel.select_caption_ids(selected_caption_ids)
         self._schedule_caption_save()
+        self._set_status(status)
 
     def _schedule_caption_save(self):
         """Coalesce rapid caption edits into one persistence operation."""
@@ -1280,9 +1425,20 @@ class MainWindow(QMainWindow):
     def _flush_caption_save(self):
         """Persist pending caption edits immediately at a commit boundary."""
         timer = getattr(self, "_caption_save_timer", None)
+        pending_status = self._status_label.text()
+        status_was_pending = pending_status.endswith("(autosave pending)")
         if timer is not None:
             timer.stop()
-        return self._save_captions()
+        saved = self._save_captions()
+        if (
+            saved
+            and status_was_pending
+            and self._status_label.text() == pending_status
+        ):
+            self._set_status(
+                pending_status.removesuffix("(autosave pending)") + "(autosaved)"
+            )
+        return saved
 
     def _on_split_feedback(self, reason: str):
         """Show a visible status message when Split cannot act."""

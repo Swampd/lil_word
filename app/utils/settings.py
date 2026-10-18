@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 import logging
 import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -92,10 +93,37 @@ class Settings:
         except Exception:
             _LOGGER.exception("Unexpected error loading settings file %s; using defaults", self._file)
 
-    def save(self):
+    def _write_data(self, data: dict) -> None:
+        """Atomically replace the settings file with ``data``."""
         self._dir.mkdir(parents=True, exist_ok=True)
-        with open(self._file, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, indent=2)
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self._dir,
+                prefix=f".{self._file.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+                json.dump(data, temp_file, indent=2)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_path, self._file)
+        except BaseException:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    _LOGGER.exception(
+                        "Could not remove temporary settings file %s",
+                        temp_path,
+                    )
+            raise
+
+    def save(self):
+        self._write_data(self._data)
 
     def get(self, key: str, default=None):
         return self._data.get(key, default)
@@ -103,6 +131,12 @@ class Settings:
     def to_dict(self) -> dict:
         """Return an isolated copy of the complete settings state."""
         return deepcopy(self._data)
+
+    def replace_all(self, values: dict) -> None:
+        """Replace and persist the complete settings state."""
+        replacement = deepcopy(values)
+        self._write_data(replacement)
+        self._data = replacement
 
     def set(self, key: str, value):
         self._data[key] = value
