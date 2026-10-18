@@ -6,6 +6,8 @@ Lil Word is a local-first desktop application for transcribing audio and video i
 
 > **Status:** Portfolio preview under active development. The core transcription, editing, project autosave, and export workflows are implemented and covered by an automated test suite.
 
+![Lil Word showing a generated caption table with editable timing and text](docs/media/lil-word-app.jpg)
+
 ## Demo
 
 [![Premiere Pro showing captions created with Lil Word](docs/media/lil-word-demo-poster.jpg)](docs/media/lil-word-demo.mp4)
@@ -77,6 +79,10 @@ On the first transcription, `faster-whisper` downloads the selected model (the d
 6. Export a subtitle file or render captions directly into the source video.
 
 Work is autosaved locally. Previous projects can be reopened from **Reopen** or **Recent** without sending their contents to an external project service.
+
+## Roadmap
+
+Complete application-wide undo/redo and direct Adobe Premiere Pro integration are planned. The current Premiere workflow exports professional subtitle files for import rather than controlling Premiere directly.
 
 ## Export formats
 
